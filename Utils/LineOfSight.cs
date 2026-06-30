@@ -701,6 +701,20 @@ namespace AreWeThereYet.Utils
         public bool IsTerrainReady() => _terrainData != null;
 
         /// <summary>
+        /// Debug helper: terrain value at a grid cell using the actual array dimensions
+        /// (not AreaDimensions). Returns -2 if no terrain loaded, -1 if out of bounds.
+        /// </summary>
+        public int GetTerrainValueAt(Vector2i grid)
+        {
+            var t = _terrainData;
+            if (t == null) return -2;
+            if (grid.Y < 0 || grid.Y >= t.Length) return -1;
+            var row = t[grid.Y];
+            if (grid.X < 0 || grid.X >= row.Length) return -1;
+            return row[grid.X];
+        }
+
+        /// <summary>
         /// Ensures terrain data is populated, throttled to 500 ms.
         /// Safe to call every tick — does nothing if data is fresh.
         /// </summary>

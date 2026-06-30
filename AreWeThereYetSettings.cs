@@ -94,6 +94,12 @@ public class DebugSettings
     public ToggleNode EnableRendering { get; set; } = new(true);
     public ToggleNode ShowTerrainDebug { get; set; } = new(false);
     public ToggleNode ShowDetailedDebug { get; set; } = new(false);
+
+    [Menu("Log Pathfinding (follower decisions to debug log)")]
+    public ToggleNode LogPathfinding { get; set; } = new(false);
+
+    [Menu("Pathfinding Log Interval (ms)")]
+    public RangeNode<int> PathfindingLogInterval { get; set; } = new(1000, 100, 5000);
     
     public RaycastSettings Raycast { get; set; } = new();
     public TerrainSettings Terrain { get; set; } = new();

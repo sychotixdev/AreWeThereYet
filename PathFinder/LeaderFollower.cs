@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AreWeThereYet.Utils;
@@ -60,6 +61,17 @@ public class LeaderFollower
     // Throttle for invalid-position diagnostics (avoid per-frame log spam)
     private DateTime _lastInvalidPosLog = DateTime.MinValue;
 
+    // Throttle for the per-tick debug summary
+    private DateTime _lastTickLog = DateTime.MinValue;
+
+    // ---- Debug logging ----------------------------------------------------
+
+    private static bool LogEnabled =>
+        AreWeThereYet.Instance.Settings.Debug.LogPathfinding.Value;
+
+    private static void DebugLog(string msg) =>
+        AreWeThereYet.Instance.LogMessage("[ATY-PF] " + msg);
+
     // ---- Accessors --------------------------------------------------------
 
     private LineOfSight LineOfSight => AreWeThereYet.Instance.lineOfSight;
@@ -102,6 +114,56 @@ public class LeaderFollower
         return g.X > 0 && g.Y > 0;
     }
 
+    /// <summary>
+    /// One concise line per interval: result type, our position, the leader's position,
+    /// distance, trail length, and the waypoint we're about to move to — each in both
+    /// world and grid space with the terrain value at that cell (0=wall, 2=dashable,
+    /// 5=walkable). A target with a very low X or a terrain value of 0 is the smoking
+    /// gun for the "runs into the wall on the left" symptom.
+    /// </summary>
+    private void LogTickSummary(Vector3 player, Vector3 leader, FollowResult r)
+    {
+        int interval = AreWeThereYet.Instance.Settings.Debug.PathfindingLogInterval.Value;
+        if ((DateTime.Now - _lastTickLog).TotalMilliseconds < interval) return;
+        _lastTickLog = DateTime.Now;
+
+        var pg = Helper.ToGrid(player);
+        var lg = Helper.ToGrid(leader);
+        float dist = Vector3.Distance(player, leader);
+
+        string target = "-";
+        if (r.Type != FollowResultType.Idle)
+        {
+            var tg = Helper.ToGrid(r.WorldPosition);
+            target = $"world({r.WorldPosition.X:F0},{r.WorldPosition.Y:F0}) grid({tg.X},{tg.Y}) " +
+                     $"tVal={LineOfSight.GetTerrainValueAt(tg)}";
+        }
+
+        DebugLog(
+            $"{r.Type} | player world({player.X:F0},{player.Y:F0}) grid({pg.X},{pg.Y}) " +
+            $"tVal={LineOfSight.GetTerrainValueAt(pg)} | " +
+            $"leader world({leader.X:F0},{leader.Y:F0}) grid({lg.X},{lg.Y}) " +
+            $"tVal={LineOfSight.GetTerrainValueAt(lg)} | " +
+            $"dist={dist:F0} trail={_trail.Count} target={target}");
+    }
+
+    /// <summary>
+    /// Formats an A* result for the log: raw/smoothed node counts plus the smoothed
+    /// waypoints (capped) in grid space, so we can see exactly where the path heads.
+    /// The smoothed path is small (a handful of points), so this stays bounded.
+    /// </summary>
+    private static string FormatGridPath(List<Vector2i> raw, List<Vector2i> smoothed)
+    {
+        const int cap = 24;
+        var sb = new StringBuilder();
+        sb.Append($"raw={raw.Count} smoothed={smoothed.Count}: ");
+        int n = Math.Min(smoothed.Count, cap);
+        for (int i = 0; i < n; i++)
+            sb.Append($"({smoothed[i].X},{smoothed[i].Y})");
+        if (smoothed.Count > cap) sb.Append("...");
+        return sb.ToString();
+    }
+
     private void CancelSearch()
     {
         _cts.Cancel();
@@ -120,6 +182,13 @@ public class LeaderFollower
     /// </summary>
     public FollowResult Tick(Vector3 playerPos, Vector3 leaderPos)
     {
+        var result = TickInternal(playerPos, leaderPos);
+        if (LogEnabled) LogTickSummary(playerPos, leaderPos, result);
+        return result;
+    }
+
+    private FollowResult TickInternal(Vector3 playerPos, Vector3 leaderPos)
+    {
         // 0a. Validate positions BEFORE anything touches them. A failed memory read of
         //     Entity.Pos returns Vector3.Zero, which Helper.ToGrid maps to grid (0,0) —
         //     the map's top-left corner. Recording that as a breadcrumb, or pathing to
@@ -127,13 +196,12 @@ public class LeaderFollower
         //     the frame entirely (no trail mutation, no A*) and re-acquire next tick.
         if (!IsValidPosition(playerPos) || !IsValidPosition(leaderPos))
         {
-            if ((DateTime.Now - _lastInvalidPosLog).TotalMilliseconds >= 500)
+            if (LogEnabled && (DateTime.Now - _lastInvalidPosLog).TotalMilliseconds >= 500)
             {
                 _lastInvalidPosLog = DateTime.Now;
-                AreWeThereYet.Instance.LogMessage(
-                    $"LeaderFollower: invalid position read — skipping tick " +
-                    $"(player={playerPos}, leader={leaderPos}). A failed Pos read " +
-                    $"defaults to Vector3.Zero => grid (0,0) = map corner.");
+                DebugLog(
+                    $"INVALID POS — skipping tick (player={playerPos}, leader={leaderPos}). " +
+                    $"A failed Pos read defaults to Vector3.Zero => grid (0,0) = map corner.");
             }
             return FollowResult.Idle;
         }
@@ -178,6 +246,8 @@ public class LeaderFollower
                 _trail.Clear();
                 foreach (var g in smoothed)
                     _trail.Add(Helper.ToWorld(g));
+
+                if (LogEnabled) DebugLog("A* result: " + FormatGridPath(gridPath, smoothed));
             }
             else if (_searchTask.IsCompletedSuccessfully && _searchTask.Result == null)
             {
@@ -187,6 +257,9 @@ public class LeaderFollower
                     _portalSuspected = true;
                     _portalPos = _trail[^1];
                     _searchTask = null;
+                    if (LogEnabled)
+                        DebugLog($"A* UNREACHABLE -> portal suspected at " +
+                                 $"world({_portalPos.X:F0},{_portalPos.Y:F0})");
                     return FollowResult.PortalSuspected(_portalPos);
                 }
             }
@@ -312,6 +385,12 @@ public class LeaderFollower
         Func<int, bool> isPathable = v => v is 1 or 5;
         int nodeBudget = PfSettings.NodeBudget.Value;
         var ct = _cts.Token;
+
+        if (LogEnabled)
+            DebugLog($"A* request: start grid({startGrid.X},{startGrid.Y}) " +
+                     $"goal grid({goalGrid.X},{goalGrid.Y}) " +
+                     $"startVal={LineOfSight.GetTerrainValueAt(startGrid)} " +
+                     $"goalVal={LineOfSight.GetTerrainValueAt(goalGrid)}");
 
         // Background thread: pure A* computation, no GameController access
         _searchTask = Task.Run(
