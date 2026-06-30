@@ -46,9 +46,11 @@ public class LeaderFollower
     // Breadcrumb trail: world positions, oldest [0] → newest [^1]
     private readonly List<Vector3> _trail = new();
 
-    // Portal detection state
+    // Reachability / portal state. Portals are inferred from PATH EXISTENCE, not from
+    // any distance heuristic: when no walkable route to the leader exists we assume a
+    // portal and fall back to the last location from which the leader WAS reachable.
     private bool _portalSuspected;
-    private Vector3 _portalPos;
+    private Vector3? _lastReachablePos;
 
     // Backstop teleport detection: a large player-position jump with no area change
     // (checkpoint release, town portal, lab transfer) should drop the stale trail.
@@ -94,7 +96,7 @@ public class LeaderFollower
     {
         _trail.Clear();
         _portalSuspected = false;
-        _portalPos = Vector3.Zero;
+        _lastReachablePos = null;
         _lastPlayerPos = null;
         CancelSearch();
     }
@@ -219,71 +221,54 @@ public class LeaderFollower
         }
         _lastPlayerPos = playerPos;
 
-        // 1. Record trail
+        // 1. Record breadcrumb trail. No portal heuristic here any more — whether the
+        //    leader is behind a portal is decided purely by whether a path to them
+        //    exists (steps 5–8), not by how far they jumped.
         RecordTrail(leaderPos);
 
         float distToLeader = Vector3.Distance(playerPos, leaderPos);
 
-        // 2. Early-exit: in position and have line-of-sight
+        // 2. In position with line-of-sight → nothing to do; leader is reachable.
         if (distToLeader <= KeepWithinDistance &&
             LineOfSight.HasLineOfSightRaw(playerPos, leaderPos))
         {
+            _lastReachablePos = leaderPos;
+            _portalSuspected = false;
             return FollowResult.Idle;
         }
 
-        // 3. Portal suspected: walk to the portal location
-        if (_portalSuspected)
-            return FollowResult.PortalSuspected(_portalPos);
-
-        // 4. Consume completed A* result (main thread, safe to call GetTerrainHeightAt)
+        // 3. Consume a completed A* search. A path means the leader is reachable (seed
+        //    the trail with it); a null result means NO walkable route exists right now
+        //    — the leader most likely took a portal/transition.
         if (_searchTask is { IsCompleted: true })
         {
             if (_searchTask.IsCompletedSuccessfully && _searchTask.Result is { Count: > 0 } gridPath)
             {
-                // Smooth the raw grid path (collapse staircases into straight/diagonal
-                // segments), then convert grid → world on main thread and seed trail.
                 var smoothed = SmoothGridPath(gridPath);
                 _trail.Clear();
                 foreach (var g in smoothed)
                     _trail.Add(Helper.ToWorld(g));
 
-                if (LogEnabled) DebugLog("A* result: " + FormatGridPath(gridPath, smoothed));
+                _portalSuspected = false;
+                if (LogEnabled) DebugLog("A* PATH FOUND: " + FormatGridPath(gridPath, smoothed));
             }
             else if (_searchTask.IsCompletedSuccessfully && _searchTask.Result == null)
             {
-                // Unreachable — corroborates portal hypothesis
-                if (_trail.Count > 0)
-                {
-                    _portalSuspected = true;
-                    _portalPos = _trail[^1];
-                    _searchTask = null;
-                    if (LogEnabled)
-                        DebugLog($"A* UNREACHABLE -> portal suspected at " +
-                                 $"world({_portalPos.X:F0},{_portalPos.Y:F0})");
-                    return FollowResult.PortalSuspected(_portalPos);
-                }
+                _portalSuspected = true;
+                if (LogEnabled) DebugLog("A* NO PATH — leader unreachable (portal suspected)");
             }
             _searchTask = null;
         }
 
-        // 5. Prune trail points that have been reached
+        // 4. Prune trail points we've already reached.
         int reachedBounds = PfSettings.ReachedBounds.Value;
         while (_trail.Count > 0 && Vector3.Distance(playerPos, _trail[0]) <= reachedBounds)
             _trail.RemoveAt(0);
 
-        // 6. Far-behind check: trail head too distant → A* acquisition
-        if (_trail.Count == 0 ||
-            Vector3.Distance(playerPos, _trail[0]) > PfSettings.AcquireDistance.Value)
-        {
-            if (_searchTask == null || _searchTask.IsCompleted)
-                RequestAstar(playerPos, leaderPos);
-            return FollowResult.Idle;
-        }
-
-        // 7. String-pull: find the furthest trail point reachable by a straight
-        //    WALKABLE line. We must use walkability (not line-of-sight) here: LOS
-        //    permits see-through/dashable gaps (e.g. a cliff), and shortcutting the
-        //    breadcrumb trail across one would send the follower off the real route.
+        // 5. Is any part of the route reachable by a straight WALKABLE line? Walkability
+        //    (not line-of-sight) is required: LOS permits see-through/dashable gaps that
+        //    aren't actually walkable. The furthest reachable breadcrumb is both our next
+        //    waypoint AND our "last known valid (reachable) location" toward the leader.
         int bestIdx = -1;
         for (int i = _trail.Count - 1; i >= 0; i--)
         {
@@ -294,11 +279,41 @@ public class LeaderFollower
             }
         }
 
-        if (bestIdx > 0)
-            _trail.RemoveRange(0, bestIdx); // discard skipped breadcrumbs
+        if (bestIdx >= 0)
+        {
+            // A valid path exists → follow it. The leader is reachable, so clear any
+            // portal suspicion and remember this reachable spot.
+            _lastReachablePos = _trail[bestIdx];
+            _portalSuspected = false;
+            if (bestIdx > 0)
+                _trail.RemoveRange(0, bestIdx); // discard skipped breadcrumbs
 
-        // Return the closest visible point (or trail head if no LOS anywhere)
-        return FollowResult.MoveTo(_trail[0]);
+            // If the leader has outrun the breadcrumb trail, refresh it with a real A*
+            // path in the background before we run out of reachable points.
+            if (distToLeader > PfSettings.AcquireDistance.Value &&
+                (_searchTask == null || _searchTask.IsCompleted))
+                RequestAstar(playerPos, leaderPos);
+
+            return FollowResult.MoveTo(_trail[0]);
+        }
+
+        // 6. Nothing on the trail is reachable. Ask A* whether ANY route to the leader
+        //    exists — it may find one the breadcrumb trail doesn't capture.
+        if (_searchTask == null || _searchTask.IsCompleted)
+            RequestAstar(playerPos, leaderPos);
+
+        // 7. No reachable route. If we have a last known reachable location, head there:
+        //    that's where the leader was before we lost the path (i.e. by the portal).
+        //    PortalSuspected lets AutoPilot look for the portal label once we arrive;
+        //    if A* hasn't answered yet we still walk there as a plain move.
+        if (_lastReachablePos is Vector3 lastReachable)
+            return _portalSuspected
+                ? FollowResult.PortalSuspected(lastReachable)
+                : FollowResult.MoveTo(lastReachable);
+
+        // 8. No path and no last known location → wait. The existing AutoPilot zone-change
+        //    logic clicks the leader's portal once they fully change areas.
+        return FollowResult.Idle;
     }
 
     // -----------------------------------------------------------------------
@@ -315,14 +330,8 @@ public class LeaderFollower
 
         float moved = Vector3.Distance(leaderPos, _trail[^1]);
 
-        // Large jump → leader teleported through a portal
-        if (moved >= TransitionDistance && !_portalSuspected)
-        {
-            _portalSuspected = true;
-            _portalPos = _trail[^1]; // position just before the jump
-        }
-
-        // Add a new breadcrumb if the leader has moved far enough
+        // Add a new breadcrumb if the leader has moved far enough. (No portal heuristic
+        // here — a large jump no longer implies a portal; path existence decides that.)
         if (moved >= PfSettings.TrailPointSpacing.Value)
         {
             _trail.Add(leaderPos);
