@@ -33,6 +33,8 @@ public class AutoPilot
     private DateTime _leaderZoneChangeTime = DateTime.MinValue;
     
     private bool _isTransitioning = false;
+    private DateTime _transitioningStartTime = DateTime.MinValue;
+    private static readonly TimeSpan TransitioningStuckTimeout = TimeSpan.FromSeconds(8);
 
     // Tracks liveness across ticks so we can detect death → respawn (e.g. release to
     // checkpoint), which does not fire an area change and would otherwise leave a
@@ -397,6 +399,23 @@ public class AutoPilot
             }
             _wasAlive = isAliveNow;
 
+            // FAILSAFE: _isTransitioning is set optimistically right before we click a
+            // portal/transition, and is normally cleared by PostTransitionGracePeriod once
+            // the engine's AreaChange() callback confirms the zone actually changed. If the
+            // click misses (player out of range, stale label rect, etc.) AreaChange() never
+            // fires, the grace period never starts, and this flag is stuck true forever -
+            // permanently disabling the zone/portal detection block below (and surviving an
+            // AutoPilot coroutine restart, since this is instance state, not coroutine state).
+            // Self-heal after a timeout so we don't get permanently wedged.
+            if (_isTransitioning && DateTime.Now - _transitioningStartTime > TransitioningStuckTimeout)
+            {
+                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                {
+                    AreWeThereYet.Instance.LogMessage($"_isTransitioning stuck true for over {TransitioningStuckTimeout.TotalSeconds:F0}s with no AreaChange - forcing reset.");
+                }
+                _isTransitioning = false;
+            }
+
             if (!AreWeThereYet.Instance.Settings.Enable.Value || !AreWeThereYet.Instance.Settings.AutoPilot.Enabled.Value || AreWeThereYet.Instance.localPlayer == null || !AreWeThereYet.Instance.localPlayer.IsAlive ||
                 !AreWeThereYet.Instance.GameController.IsForeGroundCache || MenuWindow.IsOpened || AreWeThereYet.Instance.GameController.IsLoading || !AreWeThereYet.Instance.GameController.InGame)
             {
@@ -685,6 +704,7 @@ public class AutoPilot
                             
                             // SET THE FLAG: We are about to change zones.
                             _isTransitioning = true;
+                            _transitioningStartTime = DateTime.Now;
 
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                             yield return new WaitTime(60);

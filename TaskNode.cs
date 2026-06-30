@@ -39,6 +39,7 @@ public class TaskNode
     public TaskNode(LabelOnGround labelOnGround, int bounds, TaskNodeType type = TaskNodeType.Movement)
     {
         LabelOnGround = labelOnGround;
+        WorldPosition = labelOnGround?.ItemOnGround?.Pos ?? Vector3.Zero;
         Type = type;
         Bounds = bounds;
     }
