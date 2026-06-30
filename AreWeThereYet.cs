@@ -12,6 +12,7 @@ using ExileCore.Shared;
 using ExileCore.Shared.Enums;
 using SharpDX;
 using AreWeThereYet.Utils;
+using AreWeThereYet.PathFinder;
 
 namespace AreWeThereYet;
 
@@ -20,6 +21,7 @@ public class AreWeThereYet : BaseSettingsPlugin<AreWeThereYetSettings>
     internal static AreWeThereYet Instance;
     internal AutoPilot autoPilot = new AutoPilot();
     internal LineOfSight lineOfSight;
+    internal LeaderFollower leaderFollower = new LeaderFollower();
 
     private List<Buff> buffs;
     internal DateTime lastTimeAny;
@@ -60,9 +62,13 @@ public class AreWeThereYet : BaseSettingsPlugin<AreWeThereYetSettings>
     public override void AreaChange(AreaInstance area)
     {
         base.AreaChange(area);
-        
-        // Simple area change - LineOfSight handles everything automatically
+
+        // Publish area-change event (LineOfSight subscribes to reload terrain)
         EventBus.Instance.Publish(new AreaChangeEvent());
+
+        // Reset pathfinding trail and cancel any in-flight A* search
+        leaderFollower.Reset();
+
         autoPilot.AreaChange();
     }
 

@@ -28,7 +28,6 @@ public class AutoPilotSettings
     public ToggleNode RemoveGracePeriod { get; set; } = new(true);
     public TextNode LeaderName { get; set; } = new("");
     public ToggleNode DashEnabled { get; set; } = new(false);
-    public ToggleNode CloseFollow { get; set; } = new(true);
 
     public HotkeyNode DashKey { get; set; } = new(Keys.W);
     public HotkeyNode MoveKey { get; set; } = new(Keys.Q);
@@ -52,7 +51,30 @@ public class AutoPilotSettings
     }
     
     public DashSettings Dash { get; set; } = new();
+    public PathfindingSettings Pathfinding { get; set; } = new();
     
+    [Submenu(CollapsedByDefault = true)]
+    public class PathfindingSettings
+    {
+        [Menu("Enable Pathfinding (breadcrumb + A* fallback)")]
+        public ToggleNode Enabled { get; set; } = new(true);
+
+        [Menu("Trail Point Spacing (world units, ~40)")]
+        public RangeNode<int> TrailPointSpacing { get; set; } = new(40, 10, 200);
+
+        [Menu("Reached Bounds (world units, ~50)")]
+        public RangeNode<int> ReachedBounds { get; set; } = new(50, 10, 300);
+
+        [Menu("Acquire Distance (world units, ~1500)")]
+        public RangeNode<int> AcquireDistance { get; set; } = new(1500, 200, 5000);
+
+        [Menu("Max Trail Points (safety cap)")]
+        public RangeNode<int> MaxTrailPoints { get; set; } = new(256, 64, 1024);
+
+        [Menu("A* Node Budget (cap per search)")]
+        public RangeNode<int> NodeBudget { get; set; } = new(50000, 1000, 500000);
+    }
+
     [Submenu(CollapsedByDefault = true)]
     public class DashSettings
     {

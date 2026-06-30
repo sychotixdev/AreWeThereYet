@@ -11,6 +11,7 @@ using ExileCore.Shared;
 using ExileCore.Shared.Enums;
 using SharpDX;
 using AreWeThereYet.Utils;
+using AreWeThereYet.PathFinder;
 using System.Windows.Forms;
 
 namespace AreWeThereYet;
@@ -470,83 +471,103 @@ public class AutoPilot
             }
             else if (followTarget != null)
             {
-                // Reset zone tracking when leader is found
+                // Reset zone tracking when leader is found in this zone
                 _lastKnownLeaderZone = "";
                 _leaderZoneChangeTime = DateTime.MinValue;
-                var distanceToLeader = Vector3.Distance(AreWeThereYet.Instance.playerPosition, followTarget.Pos);
-                if (distanceToLeader >= AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value)
-                {
-                    var distanceMoved = Vector3.Distance(lastTargetPosition, followTarget.Pos);
-                    if (lastTargetPosition != Vector3.Zero && distanceMoved > AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value)
-                    {
-                        var transition = GetBestPortalLabel(leaderPartyElement);
-                        if (transition != null && transition.ItemOnGround.DistancePlayer < 80)
-                            tasks.Add(new TaskNode(transition, 200, TaskNodeType.Transition));
-                    }
-                    else if (tasks.Count == 0 && distanceMoved < 2000 && distanceToLeader > 200 && distanceToLeader < 2000)
-                    {
-                        tasks.Add(new TaskNode(followTarget.Pos, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance));
-                    }
 
-                    else if (tasks.Count > 0)
+                var playerPos     = AreWeThereYet.Instance.playerPosition;
+                var leaderPos     = followTarget.Pos;
+                var pfSettings    = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding;
+                var reachedBounds = pfSettings.ReachedBounds.Value;
+
+                // --- Movement task generation ---
+                if (pfSettings.Enabled.Value)
+                {
+                    // Breadcrumb-first pathfinding: trail recording + LOS string-pull + A* fallback
+                    var followResult = AreWeThereYet.Instance.leaderFollower.Tick(playerPos, leaderPos);
+
+                    switch (followResult.Type)
                     {
-                        var distanceFromLastTask = Vector3.Distance(tasks.Last().WorldPosition, followTarget.Pos);
-                        if (distanceFromLastTask >= AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance)
-                            tasks.Add(new TaskNode(followTarget.Pos, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance));
+                        case FollowResultType.Idle:
+                            // In position — clear any stale movement tasks
+                            tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                            break;
+
+                        case FollowResultType.MoveTo:
+                            // Replace movement tasks with the next waypoint
+                            tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                            tasks.Add(new TaskNode(followResult.WorldPosition, reachedBounds, TaskNodeType.Movement));
+                            break;
+
+                        case FollowResultType.PortalSuspected:
+                            // Walk to the last trail point (portal location).
+                            // Once in label range, the existing Transition task logic clicks it.
+                            if (!tasks.Exists(t => t.Type == TaskNodeType.Movement))
+                                tasks.Add(new TaskNode(followResult.WorldPosition, reachedBounds, TaskNodeType.Movement));
+
+                            // If we're close to the suspected portal location, look for a portal label
+                            var distToPortal = Vector3.Distance(playerPos, followResult.WorldPosition);
+                            if (distToPortal < AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value)
+                            {
+                                var transition = GetBestPortalLabel(leaderPartyElement);
+                                if (transition != null && transition.ItemOnGround.DistancePlayer < 80)
+                                {
+                                    tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                                    tasks.Add(new TaskNode(transition, 200, TaskNodeType.Transition));
+                                }
+                            }
+                            break;
                     }
                 }
                 else
                 {
-                    if (tasks.Count > 0)
+                    // Pathfinding disabled: simple direct-follow fallback
+                    var distanceToLeader = Vector3.Distance(playerPos, leaderPos);
+                    if (distanceToLeader >= AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value)
                     {
-                        for (var i = tasks.Count - 1; i >= 0; i--)
-                            if (tasks[i].Type == TaskNodeType.Movement || tasks[i].Type == TaskNodeType.Transition)
-                                tasks.RemoveAt(i);
-                        yield return null;
+                        tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                        tasks.Add(new TaskNode(leaderPos, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value));
                     }
-                    if (AreWeThereYet.Instance.Settings.AutoPilot.CloseFollow.Value)
+                    else
                     {
-                        if (distanceToLeader >= AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value)
-                            tasks.Add(new TaskNode(followTarget.Pos, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance));
+                        tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
                     }
+                }
 
-                    var isHideout = (bool)AreWeThereYet.Instance?.GameController?.Area?.CurrentArea?.IsHideout;
-                    if (!isHideout)
+                // --- Loot and MercenaryOptIn (unchanged) ---
+                var isHideout = (bool)AreWeThereYet.Instance?.GameController?.Area?.CurrentArea?.IsHideout;
+                if (!isHideout)
+                {
+                    var questLoot = GetQuestItem();
+                    if (questLoot != null &&
+                        Vector3.Distance(AreWeThereYet.Instance.playerPosition, questLoot.Pos) < AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value &&
+                        tasks.Find(I => I.Type == TaskNodeType.Loot) == null)
                     {
-                        var questLoot = GetQuestItem();
-                        if (questLoot != null &&
-                            Vector3.Distance(AreWeThereYet.Instance.playerPosition, questLoot.Pos) < AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value &&
-                            tasks.FirstOrDefault(I => I.Type == TaskNodeType.Loot) == null)
-                        {
-                            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
-                            {
-                                var distance = Vector3.Distance(AreWeThereYet.Instance.playerPosition, questLoot.Pos);
-                                AreWeThereYet.Instance.LogMessage($"Adding quest loot task - Distance: {distance:F1}, Item: {questLoot.Metadata}");
-                            }
-                            tasks.Add(new TaskNode(questLoot.Pos, AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance, TaskNodeType.Loot));
-                        }
-                        else if (questLoot != null && AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                         {
                             var distance = Vector3.Distance(AreWeThereYet.Instance.playerPosition, questLoot.Pos);
-                            var hasLootTask = tasks.FirstOrDefault(I => I.Type == TaskNodeType.Loot) != null;
-                            AreWeThereYet.Instance.LogMessage($"Quest loot NOT added - Distance: {distance:F1}, TooFar: {distance >= AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value}, HasLootTask: {hasLootTask}");
+                            AreWeThereYet.Instance.LogMessage($"Adding quest loot task - Distance: {distance:F1}, Item: {questLoot.Metadata}");
                         }
-
-
-                        var mercenaryOptIn = GetMercenaryOptInButton();
-                        if (mercenaryOptIn != null &&
-                            Vector3.Distance(AreWeThereYet.Instance.playerPosition, mercenaryOptIn.ItemOnGround.Pos) < AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value &&
-                            tasks.FirstOrDefault(I => I.Type == TaskNodeType.MercenaryOptIn) == null)
-                        {
-                            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
-                            {
-                                AreWeThereYet.Instance.LogMessage($"Found mercenary OPT-IN button - adding to tasks");
-                            }
-                            tasks.Add(new TaskNode(mercenaryOptIn, AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance, TaskNodeType.MercenaryOptIn));
-                        }
+                        tasks.Add(new TaskNode(questLoot.Pos, AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance, TaskNodeType.Loot));
+                    }
+                    else if (questLoot != null && AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                    {
+                        var distance = Vector3.Distance(AreWeThereYet.Instance.playerPosition, questLoot.Pos);
+                        var hasLootTask = tasks.Find(I => I.Type == TaskNodeType.Loot) != null;
+                        AreWeThereYet.Instance.LogMessage($"Quest loot NOT added - Distance: {distance:F1}, TooFar: {distance >= AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value}, HasLootTask: {hasLootTask}");
                     }
 
+                    var mercenaryOptIn = GetMercenaryOptInButton();
+                    if (mercenaryOptIn != null &&
+                        Vector3.Distance(AreWeThereYet.Instance.playerPosition, mercenaryOptIn.ItemOnGround.Pos) < AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance.Value &&
+                        tasks.Find(I => I.Type == TaskNodeType.MercenaryOptIn) == null)
+                    {
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            AreWeThereYet.Instance.LogMessage("Found mercenary OPT-IN button - adding to tasks");
+                        tasks.Add(new TaskNode(mercenaryOptIn, AreWeThereYet.Instance.Settings.AutoPilot.TransitionDistance, TaskNodeType.MercenaryOptIn));
+                    }
                 }
+
                 if (followTarget?.Pos != null)
                     lastTargetPosition = followTarget.Pos;
             }
@@ -585,7 +606,7 @@ public class AutoPilot
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                         }
 
-                        if (taskDistance <= AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value * 1.5)
+                        if (taskDistance <= AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.ReachedBounds.Value)
                             tasks.RemoveAt(0);
                         yield return null;
                         yield return null;

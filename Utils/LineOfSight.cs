@@ -129,7 +129,8 @@ namespace AreWeThereYet.Utils
         }
 
         /// <summary>
-        /// Enhanced terrain data loading - manual memory reading for real-time updates
+        /// Enhanced terrain data loading - manual memory reading for real-time updates.
+        /// Publishes atomically: builds into a local array, then assigns _terrainData once.
         /// </summary>
         private void UpdateTerrainData()
         {
@@ -160,12 +161,13 @@ namespace AreWeThereYet.Utils
                 var numRows = (int)(terrain.NumRows - 1) * 23;
                 if ((numCols & 1) > 0) numCols++;
 
-                // Initialize combined terrain data
-                _terrainData = new int[numRows][];
+                // Build into a LOCAL array first — publish atomically at the end so background
+                // readers always see a fully populated array or null, never a half-filled one.
+                var newData = new int[numRows][];
 
                 for (var y = 0; y < numRows; y++)
                 {
-                    _terrainData[y] = new int[numCols];
+                    newData[y] = new int[numCols];
                     var dataIndex = y * terrain.BytesPerRow;
 
                     for (var x = 0; x < numCols; x += 2)
@@ -181,11 +183,14 @@ namespace AreWeThereYet.Utils
                         var ranged2 = (rangedB >> 4) > 3 ? 2 : 0;
 
                         // COMBINE LAYERS
-                        _terrainData[y][x] = CombineTerrainLayers(melee1, ranged1);
+                        newData[y][x] = CombineTerrainLayers(melee1, ranged1);
                         if (x + 1 < numCols)
-                            _terrainData[y][x + 1] = CombineTerrainLayers(melee2, ranged2);
+                            newData[y][x + 1] = CombineTerrainLayers(melee2, ranged2);
                     }
                 }
+
+                // Atomic publish — background readers snapshot this reference safely
+                _terrainData = newData;
 
                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                 {
@@ -663,6 +668,49 @@ namespace AreWeThereYet.Utils
             if (!IsInBounds(x, y)) return -1;
             return _terrainData[y][x];
         }
+
+        // ----------------------------------------------------------------
+        // Public helpers for pathfinding (decoupled from debug rendering)
+        // ----------------------------------------------------------------
+
+        /// <summary>
+        /// Returns the current terrain snapshot. The reference is atomically published;
+        /// callers may snapshot it and use it from a background thread safely.
+        /// </summary>
+        public int[][] GetTerrainData() => _terrainData;
+
+        /// <summary>Returns true when terrain data has been loaded.</summary>
+        public bool IsTerrainReady() => _terrainData != null;
+
+        /// <summary>
+        /// Ensures terrain data is populated, throttled to 500 ms.
+        /// Safe to call every tick — does nothing if data is fresh.
+        /// </summary>
+        public void EnsureTerrainData()
+        {
+            var timeSinceRefresh = (DateTime.Now - _lastTerrainRefresh).TotalMilliseconds;
+            if (_terrainData == null || timeSinceRefresh >= 500)
+            {
+                UpdateTerrainData();
+                _lastTerrainRefresh = DateTime.Now;
+            }
+        }
+
+        /// <summary>
+        /// Pure line-of-sight check in world space. Converts to grid internally.
+        /// No terrain refresh, no debug side-effects — safe to call each tick.
+        /// </summary>
+        public bool HasLineOfSightRaw(SharpDX.Vector3 worldStart, SharpDX.Vector3 worldEnd)
+        {
+            if (_terrainData == null) return false;
+            var gs = Helper.ToGrid(worldStart);
+            var ge = Helper.ToGrid(worldEnd);
+            return HasLineOfSightInternal(
+                new Vector2(gs.X, gs.Y),
+                new Vector2(ge.X, ge.Y));
+        }
+
+        // ----------------------------------------------------------------
 
         public void Clear()
         {
