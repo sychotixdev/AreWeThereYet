@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AreWeThereYet.Utils;
@@ -56,8 +55,8 @@ public class LeaderFollower
     // (checkpoint release, town portal, lab transfer) should drop the stale trail.
     private Vector3? _lastPlayerPos;
 
-    // Background A* task
-    private Task<List<Vector2i>?>? _searchTask;
+    // Background JPS task
+    private Task<PathResult>? _searchTask;
     private CancellationTokenSource _cts = new();
 
     // Goal grid of the most recent A* request — used to label a result as reaching the
@@ -154,21 +153,21 @@ public class LeaderFollower
     }
 
     /// <summary>
-    /// Formats an A* result for the log: raw/smoothed node counts plus the smoothed
-    /// waypoints (capped) in grid space, so we can see exactly where the path heads.
-    /// The smoothed path is small (a handful of points), so this stays bounded.
+    /// One concise, fixed-shape line per JPS search — easy to grep/parse and bounded in
+    /// size (no per-waypoint dump). Fields:
+    ///   outcome  = Reached | Partial | Unreachable | Invalid
+    ///   exp/gen  = jump points expanded / generated (JPS efficiency — expect exp far
+    ///              below the old A* cell counts in open areas)
+    ///   raw      = jump points returned by JPS
+    ///   smooth   = waypoints after string-pull
+    ///   cost     = path length in grid units
+    ///   t        = search time (ms)
+    ///   goal     = goal cell
     /// </summary>
-    private static string FormatGridPath(List<Vector2i> raw, List<Vector2i> smoothed)
-    {
-        const int cap = 24;
-        var sb = new StringBuilder();
-        sb.Append($"raw={raw.Count} smoothed={smoothed.Count}: ");
-        int n = Math.Min(smoothed.Count, cap);
-        for (int i = 0; i < n; i++)
-            sb.Append($"({smoothed[i].X},{smoothed[i].Y})");
-        if (smoothed.Count > cap) sb.Append("...");
-        return sb.ToString();
-    }
+    private string FormatSearch(PathResult res, int rawCount, int smoothCount) =>
+        $"JPS {res.Outcome} exp={res.Expanded} gen={res.Generated} " +
+        $"raw={rawCount} smooth={smoothCount} cost={res.Cost:F0} " +
+        $"t={res.ElapsedMs:F1}ms goal({_lastAstarGoal.X},{_lastAstarGoal.Y})";
 
     private void CancelSearch()
     {
@@ -241,31 +240,30 @@ public class LeaderFollower
             return FollowResult.Idle;
         }
 
-        // 3. Consume a completed A* search. A path means the leader is reachable (seed
-        //    the trail with it); a null result means NO walkable route exists right now
+        // 3. Consume a completed JPS search. A path means the leader is reachable (seed
+        //    the trail with it); a null path means NO walkable route exists right now
         //    — the leader most likely took a portal/transition.
         if (_searchTask is { IsCompleted: true })
         {
-            if (_searchTask.IsCompletedSuccessfully && _searchTask.Result is { Count: > 0 } gridPath)
+            if (_searchTask.IsCompletedSuccessfully)
             {
-                var smoothed = SmoothGridPath(gridPath);
-                _trail.Clear();
-                foreach (var g in smoothed)
-                    _trail.Add(Helper.ToWorld(g));
-
-                _portalSuspected = false;
-                if (LogEnabled)
+                var res = _searchTask.Result;
+                if (res.Path is { Count: > 0 } gridPath)
                 {
-                    var end = gridPath[^1];
-                    bool reached = end.X == _lastAstarGoal.X && end.Y == _lastAstarGoal.Y;
-                    DebugLog($"A* PATH {(reached ? "FOUND (reaches leader)" : "PARTIAL (budget; closest approach — will re-path)")}: "
-                             + FormatGridPath(gridPath, smoothed));
+                    var smoothed = SmoothGridPath(gridPath);
+                    _trail.Clear();
+                    foreach (var g in smoothed)
+                        _trail.Add(Helper.ToWorld(g));
+
+                    _portalSuspected = false;
+                    if (LogEnabled) DebugLog(FormatSearch(res, gridPath.Count, smoothed.Count));
                 }
-            }
-            else if (_searchTask.IsCompletedSuccessfully && _searchTask.Result == null)
-            {
-                _portalSuspected = true;
-                if (LogEnabled) DebugLog("A* NO PATH — leader unreachable (portal suspected)");
+                else
+                {
+                    // No walkable route → assume the leader is behind a portal/transition.
+                    _portalSuspected = true;
+                    if (LogEnabled) DebugLog(FormatSearch(res, 0, 0));
+                }
             }
             _searchTask = null;
         }
@@ -407,12 +405,12 @@ public class LeaderFollower
         var ct = _cts.Token;
 
         if (LogEnabled)
-            DebugLog($"A* request: start grid({startGrid.X},{startGrid.Y}) " +
+            DebugLog($"JPS request: start grid({startGrid.X},{startGrid.Y}) " +
                      $"goal grid({goalGrid.X},{goalGrid.Y}) " +
                      $"startVal={LineOfSight.GetTerrainValueAt(startGrid)} " +
                      $"goalVal={LineOfSight.GetTerrainValueAt(goalGrid)}");
 
-        // Background thread: pure A* computation, no GameController access
+        // Background thread: pure JPS computation, no GameController access
         _searchTask = Task.Run(
             () => AStar.FindPath(terrain, startGrid, goalGrid, isPathable, nodeBudget, ct),
             ct);
