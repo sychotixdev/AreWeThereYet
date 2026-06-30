@@ -87,6 +87,17 @@ public static class AStar
 
         int explored = 0;
 
+        // Track the closest-to-goal node expanded so far. The budget is checked on every
+        // expansion, so on a long route (e.g. a leader hundreds of cells away in open
+        // terrain) A* ALWAYS hits the budget before reaching the goal. Returning null
+        // there would be read as "unreachable" even though the goal is perfectly
+        // walkable. Instead we return a PARTIAL path to this closest node: the follower
+        // makes real progress and re-paths as it closes in (and far-off doors resolve to
+        // walkable as terrain refreshes near them). null is reserved for a genuinely
+        // disconnected goal — the open set drains completely within budget.
+        Vector2i closest = startGrid;
+        float closestH = Heuristic(startGrid, goalGrid);
+
         while (queue.Count > 0)
         {
             ct.ThrowIfCancellationRequested();
@@ -100,8 +111,21 @@ public static class AStar
             if (current.X == goalGrid.X && current.Y == goalGrid.Y)
                 return ReconstructPath(cameFrom, current);
 
+            float hCur = Heuristic(current, goalGrid);
+            if (hCur < closestH)
+            {
+                closestH = hCur;
+                closest = current;
+            }
+
             if (++explored > nodeBudget)
-                return null; // Budget exhausted
+            {
+                // Budget exhausted. Return the best partial path unless we made no
+                // progress at all (then there's genuinely nothing to follow).
+                return (closest.X == startGrid.X && closest.Y == startGrid.Y)
+                    ? null
+                    : ReconstructPath(cameFrom, closest);
+            }
 
             float g = gScore[current];
 

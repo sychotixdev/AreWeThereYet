@@ -60,6 +60,10 @@ public class LeaderFollower
     private Task<List<Vector2i>?>? _searchTask;
     private CancellationTokenSource _cts = new();
 
+    // Goal grid of the most recent A* request — used to label a result as reaching the
+    // leader vs a partial (budget-limited) path that stops short.
+    private Vector2i _lastAstarGoal;
+
     // Throttle for invalid-position diagnostics (avoid per-frame log spam)
     private DateTime _lastInvalidPosLog = DateTime.MinValue;
 
@@ -250,7 +254,13 @@ public class LeaderFollower
                     _trail.Add(Helper.ToWorld(g));
 
                 _portalSuspected = false;
-                if (LogEnabled) DebugLog("A* PATH FOUND: " + FormatGridPath(gridPath, smoothed));
+                if (LogEnabled)
+                {
+                    var end = gridPath[^1];
+                    bool reached = end.X == _lastAstarGoal.X && end.Y == _lastAstarGoal.Y;
+                    DebugLog($"A* PATH {(reached ? "FOUND (reaches leader)" : "PARTIAL (budget; closest approach — will re-path)")}: "
+                             + FormatGridPath(gridPath, smoothed));
+                }
             }
             else if (_searchTask.IsCompletedSuccessfully && _searchTask.Result == null)
             {
@@ -390,6 +400,7 @@ public class LeaderFollower
         // Snapshot grid coords on main thread (simple arithmetic, safe either way)
         var startGrid = Helper.ToGrid(startWorld);
         var goalGrid  = Helper.ToGrid(goalWorld);
+        _lastAstarGoal = goalGrid;
 
         Func<int, bool> isPathable = v => v is 1 or 5;
         int nodeBudget = PfSettings.NodeBudget.Value;
