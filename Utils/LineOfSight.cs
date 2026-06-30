@@ -710,6 +710,125 @@ namespace AreWeThereYet.Utils
                 new Vector2(ge.X, ge.Y));
         }
 
+        /// <summary>
+        /// Pure WALKABILITY check along a straight line in world space. Unlike
+        /// <see cref="HasLineOfSightRaw"/>, this treats dashable/ranged-only terrain
+        /// (value 2) and blocked terrain (value 0) as NON-walkable. Used for breadcrumb
+        /// shortcutting so the follower never cuts a path across a see-through-but-
+        /// unwalkable gap (e.g. a cliff). No refresh, no debug side-effects.
+        /// </summary>
+        public bool HasWalkableLineRaw(SharpDX.Vector3 worldStart, SharpDX.Vector3 worldEnd)
+        {
+            if (_terrainData == null) return false;
+            var gs = Helper.ToGrid(worldStart);
+            var ge = Helper.ToGrid(worldEnd);
+            return HasWalkableLineInternal(
+                new Vector2(gs.X, gs.Y),
+                new Vector2(ge.X, ge.Y));
+        }
+
+        /// <summary>
+        /// Walkability-only DDA traversal. A cell is walkable only when it is neither
+        /// blocked (0) nor dashable/ranged-only (2). Mirrors the LOS DDA stepping but
+        /// with strict walkable semantics and no debug mutation.
+        /// </summary>
+        private bool HasWalkableLineInternal(Vector2 start, Vector2 end)
+        {
+            var startX = (int)start.X;
+            var startY = (int)start.Y;
+            var endX = (int)end.X;
+            var endY = (int)end.Y;
+
+            if (!IsInBounds(startX, startY) || !IsInBounds(endX, endY))
+                return false;
+
+            var dx = Math.Abs(endX - startX);
+            var dy = Math.Abs(endY - startY);
+
+            var x = startX;
+            var y = startY;
+            var stepX = startX < endX ? 1 : -1;
+            var stepY = startY < endY ? 1 : -1;
+
+            if (dx == 0)
+            {
+                for (var i = 0; i < dy; i++)
+                {
+                    y += stepY;
+                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                }
+                return true;
+            }
+
+            if (dy == 0)
+            {
+                for (var i = 0; i < dx; i++)
+                {
+                    x += stepX;
+                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                }
+                return true;
+            }
+
+            var deltaErr = Math.Abs((float)dy / dx);
+            var error = 0.0f;
+
+            if (dx >= dy)
+            {
+                for (var i = 0; i < dx; i++)
+                {
+                    x += stepX;
+                    error += deltaErr;
+                    if (error >= 0.5f)
+                    {
+                        y += stepY;
+                        error -= 1.0f;
+                    }
+                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                }
+            }
+            else
+            {
+                deltaErr = Math.Abs((float)dx / dy);
+                for (var i = 0; i < dy; i++)
+                {
+                    y += stepY;
+                    error += deltaErr;
+                    if (error >= 0.5f)
+                    {
+                        x += stepX;
+                        error -= 1.0f;
+                    }
+                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Grid-space walkability check between two cells. Used to smooth (string-pull)
+        /// the raw A* grid path so collinear/diagonal runs collapse into straight
+        /// segments instead of "right then up" staircases.
+        /// </summary>
+        public bool HasWalkableLineGrid(Vector2i a, Vector2i b)
+        {
+            if (_terrainData == null) return false;
+            return HasWalkableLineInternal(new Vector2(a.X, a.Y), new Vector2(b.X, b.Y));
+        }
+
+        /// <summary>
+        /// Strict walkability predicate: blocked (0) and dashable/ranged-only (2) are
+        /// NOT walkable. Everything else (1, 5, and conservative higher values) is.
+        /// Independent of the DashEnabled setting, unlike <see cref="IsTerrainPassable"/>.
+        /// </summary>
+        private bool IsTerrainWalkable(Vector2 pos)
+        {
+            var terrainValue = GetTerrainValue(pos);
+            if (terrainValue < 0) return false; // out of bounds
+            return terrainValue != 0 && terrainValue != 2;
+        }
+
         // ----------------------------------------------------------------
 
         public void Clear()

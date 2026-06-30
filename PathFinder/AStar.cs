@@ -11,14 +11,23 @@ namespace AreWeThereYet.PathFinder;
 /// </summary>
 public static class AStar
 {
-    // 8-direction offsets: 4 cardinals then 4 diagonals
+    // 8-direction offsets: diagonals FIRST so that, among equal-cost paths, the search
+    // front expands diagonals before cardinals. Combined with the heuristic tie-break
+    // below this biases results toward straight diagonals instead of "right then up"
+    // L-shapes. (Paths are also string-pulled downstream, but a straighter raw path
+    // means fewer nodes expanded and cleaner smoothing.)
     private static readonly (int dx, int dy)[] NeighborOffsets =
     [
-        ( 0, -1), ( 0,  1), (-1,  0), ( 1,  0),   // cardinals
-        (-1, -1), (-1,  1), ( 1, -1), ( 1,  1),    // diagonals
+        (-1, -1), (-1,  1), ( 1, -1), ( 1,  1),   // diagonals
+        ( 0, -1), ( 0,  1), (-1,  0), ( 1,  0),    // cardinals
     ];
 
     private const float DiagCost = 1.41421356f; // √2
+
+    // Tiny tie-break factor applied to the heuristic. Breaks ties between equal-cost
+    // paths in favour of the one nearer the goal, nudging the search toward straight
+    // lines. Kept small so path length stays effectively optimal.
+    private const float TieBreak = 1.0f + 1.0f / 1024f;
 
     /// <summary>
     /// Finds a grid-space path from <paramref name="startGrid"/> to <paramref name="goalGrid"/>.
@@ -118,7 +127,7 @@ public static class AStar
     {
         float dx = MathF.Abs(a.X - b.X);
         float dy = MathF.Abs(a.Y - b.Y);
-        return Math.Max(dx, dy) + (DiagCost - 1f) * Math.Min(dx, dy);
+        return (Math.Max(dx, dy) + (DiagCost - 1f) * Math.Min(dx, dy)) * TieBreak;
     }
 
     private static List<Vector2i> ReconstructPath(Dictionary<Vector2i, Vector2i> cameFrom, Vector2i goal)

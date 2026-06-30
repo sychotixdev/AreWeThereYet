@@ -34,12 +34,19 @@ public class AutoPilot
     
     private bool _isTransitioning = false;
 
+    // Tracks liveness across ticks so we can detect death → respawn (e.g. release to
+    // checkpoint), which does not fire an area change and would otherwise leave a
+    // stale breadcrumb trail in place.
+    private bool _wasAlive = true;
+
     private void ResetPathing()
     {
         tasks = new List<TaskNode>();
         followTarget = null;
         lastTargetPosition = Vector3.Zero;
         lastPlayerPosition = Vector3.Zero;
+        // Keep the breadcrumb trail/A* search in lockstep with task reset.
+        AreWeThereYet.Instance.leaderFollower.Reset();
     }
 
 
@@ -376,6 +383,20 @@ public class AutoPilot
             // =================================================================
             // SECTION 1: INITIAL CHECKS & UI CLEANUP
             // =================================================================
+
+            // Death detection: releasing to checkpoint does NOT fire an area change,
+            // so reset pathing the moment we die. On respawn the empty trail forces a
+            // fresh A* re-acquisition (the backup) from wherever we come back.
+            var deathCheckPlayer = AreWeThereYet.Instance.localPlayer;
+            bool isAliveNow = deathCheckPlayer != null && deathCheckPlayer.IsAlive;
+            if (_wasAlive && !isAliveNow)
+            {
+                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                    AreWeThereYet.Instance.LogMessage("Death detected - resetting pathfinding to fall back to A*.");
+                ResetPathing();
+            }
+            _wasAlive = isAliveNow;
+
             if (!AreWeThereYet.Instance.Settings.Enable.Value || !AreWeThereYet.Instance.Settings.AutoPilot.Enabled.Value || AreWeThereYet.Instance.localPlayer == null || !AreWeThereYet.Instance.localPlayer.IsAlive ||
                 !AreWeThereYet.Instance.GameController.IsForeGroundCache || MenuWindow.IsOpened || AreWeThereYet.Instance.GameController.IsLoading || !AreWeThereYet.Instance.GameController.InGame)
             {

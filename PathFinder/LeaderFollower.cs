@@ -49,6 +49,10 @@ public class LeaderFollower
     private bool _portalSuspected;
     private Vector3 _portalPos;
 
+    // Backstop teleport detection: a large player-position jump with no area change
+    // (checkpoint release, town portal, lab transfer) should drop the stale trail.
+    private Vector3? _lastPlayerPos;
+
     // Background A* task
     private Task<List<Vector2i>?>? _searchTask;
     private CancellationTokenSource _cts = new();
@@ -76,6 +80,7 @@ public class LeaderFollower
         _trail.Clear();
         _portalSuspected = false;
         _portalPos = Vector3.Zero;
+        _lastPlayerPos = null;
         CancelSearch();
     }
 
@@ -100,6 +105,16 @@ public class LeaderFollower
         // Ensure terrain is populated (throttled to 500 ms, no-op if fresh)
         LineOfSight.EnsureTerrainData();
 
+        // 0. Teleport backstop: if the player jumped further than a normal step in a
+        //    single tick (e.g. respawned at a checkpoint without an area change), the
+        //    existing trail no longer connects to us — drop it and re-acquire via A*.
+        if (_lastPlayerPos is Vector3 lastPos &&
+            Vector3.Distance(lastPos, playerPos) >= TransitionDistance)
+        {
+            Reset();
+        }
+        _lastPlayerPos = playerPos;
+
         // 1. Record trail
         RecordTrail(leaderPos);
 
@@ -121,9 +136,11 @@ public class LeaderFollower
         {
             if (_searchTask.IsCompletedSuccessfully && _searchTask.Result is { Count: > 0 } gridPath)
             {
-                // Convert grid → world on main thread, seed trail
+                // Smooth the raw grid path (collapse staircases into straight/diagonal
+                // segments), then convert grid → world on main thread and seed trail.
+                var smoothed = SmoothGridPath(gridPath);
                 _trail.Clear();
-                foreach (var g in gridPath)
+                foreach (var g in smoothed)
                     _trail.Add(Helper.ToWorld(g));
             }
             else if (_searchTask.IsCompletedSuccessfully && _searchTask.Result == null)
@@ -154,11 +171,14 @@ public class LeaderFollower
             return FollowResult.Idle;
         }
 
-        // 7. String-pull: find the furthest visible trail point (LOS shortcut)
+        // 7. String-pull: find the furthest trail point reachable by a straight
+        //    WALKABLE line. We must use walkability (not line-of-sight) here: LOS
+        //    permits see-through/dashable gaps (e.g. a cliff), and shortcutting the
+        //    breadcrumb trail across one would send the follower off the real route.
         int bestIdx = -1;
         for (int i = _trail.Count - 1; i >= 0; i--)
         {
-            if (LineOfSight.HasLineOfSightRaw(playerPos, _trail[i]))
+            if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i]))
             {
                 bestIdx = i;
                 break;
@@ -203,6 +223,41 @@ public class LeaderFollower
             if (_trail.Count > max)
                 _trail.RemoveRange(0, _trail.Count - max);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Path smoothing (string-pull the raw A* grid path)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Collapses a dense grid path into a minimal set of waypoints by skipping to the
+    /// furthest later cell still reachable by a straight WALKABLE line. Removes the
+    /// "right then up" staircases A* produces on equal-cost open terrain; a pure
+    /// diagonal collapses to a single start→end segment.
+    /// </summary>
+    private List<Vector2i> SmoothGridPath(List<Vector2i> path)
+    {
+        if (path.Count <= 2) return path;
+
+        var result = new List<Vector2i> { path[0] };
+        int anchor = 0;
+
+        while (anchor < path.Count - 1)
+        {
+            int next = anchor + 1; // guaranteed progress (adjacent cells are walkable)
+            for (int j = path.Count - 1; j > anchor; j--)
+            {
+                if (LineOfSight.HasWalkableLineGrid(path[anchor], path[j]))
+                {
+                    next = j;
+                    break;
+                }
+            }
+            result.Add(path[next]);
+            anchor = next;
+        }
+
+        return result;
     }
 
     // -----------------------------------------------------------------------
