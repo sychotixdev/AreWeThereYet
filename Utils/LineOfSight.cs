@@ -26,6 +26,9 @@ namespace AreWeThereYet.Utils
         private int[][] _terrainData;
         private Vector2i _areaDimensions;
 
+        // One-time guard so the terrain/area dimension mismatch warning logs at most once per area.
+        private bool _dimMismatchLogged;
+
         // Periodic refresh for dynamic door detection
         private DateTime _lastTerrainRefresh = DateTime.MinValue;
         private int TerrainRefreshInterval => AreWeThereYet.Instance.Settings.Debug.Terrain.RefreshInterval?.Value ?? 500;
@@ -105,6 +108,7 @@ namespace AreWeThereYet.Utils
         public void UpdateArea()
         {
             _areaDimensions = _gameController.IngameState.Data.AreaDimensions;
+            _dimMismatchLogged = false; // re-arm the per-area mismatch warning
             UpdateTerrainData();
             _lastTerrainRefresh = DateTime.Now;
         }
@@ -160,6 +164,20 @@ namespace AreWeThereYet.Utils
                 var numCols = (int)(terrain.NumCols - 1) * 23;
                 var numRows = (int)(terrain.NumRows - 1) * 23;
                 if ((numCols & 1) > 0) numCols++;
+
+                // Sanity check: IsInBounds gates terrain[y][x] reads on _areaDimensions,
+                // but this array is sized (numCols x numRows). If they disagree, an index
+                // inside _areaDimensions but outside the array throws IndexOutOfRange, and
+                // pathfinding/LOS silently consult the wrong cell. Warn once per area.
+                if (!_dimMismatchLogged &&
+                    (numCols != _areaDimensions.X || numRows != _areaDimensions.Y))
+                {
+                    _dimMismatchLogged = true;
+                    AreWeThereYet.Instance.LogError(
+                        $"LineOfSight: terrain array ({numCols}x{numRows}) disagrees with " +
+                        $"AreaDimensions ({_areaDimensions.X}x{_areaDimensions.Y}). " +
+                        $"Bounds checks use AreaDimensions and may read the wrong cell or throw.");
+                }
 
                 // Build into a LOCAL array first — publish atomically at the end so background
                 // readers always see a fully populated array or null, never a half-filled one.

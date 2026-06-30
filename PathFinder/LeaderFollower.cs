@@ -57,6 +57,9 @@ public class LeaderFollower
     private Task<List<Vector2i>?>? _searchTask;
     private CancellationTokenSource _cts = new();
 
+    // Throttle for invalid-position diagnostics (avoid per-frame log spam)
+    private DateTime _lastInvalidPosLog = DateTime.MinValue;
+
     // ---- Accessors --------------------------------------------------------
 
     private LineOfSight LineOfSight => AreWeThereYet.Instance.lineOfSight;
@@ -84,6 +87,21 @@ public class LeaderFollower
         CancelSearch();
     }
 
+    /// <summary>
+    /// Rejects positions that indicate a failed/garbage memory read: NaN components,
+    /// an exact Vector3.Zero, or any value that quantises to grid (0,0). These are the
+    /// signatures of a transient read failure, which would otherwise be baked into the
+    /// breadcrumb trail as an off-map waypoint. A legitimate position at the extreme
+    /// map-edge corner would also be rejected, but that just harmlessly skips one tick.
+    /// </summary>
+    private static bool IsValidPosition(Vector3 p)
+    {
+        if (float.IsNaN(p.X) || float.IsNaN(p.Y) || float.IsNaN(p.Z)) return false;
+        if (p == Vector3.Zero) return false;
+        var g = Helper.ToGrid(p);
+        return g.X > 0 && g.Y > 0;
+    }
+
     private void CancelSearch()
     {
         _cts.Cancel();
@@ -102,6 +120,24 @@ public class LeaderFollower
     /// </summary>
     public FollowResult Tick(Vector3 playerPos, Vector3 leaderPos)
     {
+        // 0a. Validate positions BEFORE anything touches them. A failed memory read of
+        //     Entity.Pos returns Vector3.Zero, which Helper.ToGrid maps to grid (0,0) —
+        //     the map's top-left corner. Recording that as a breadcrumb, or pathing to
+        //     it, produces a waypoint thousands of units off-map. On a bad read we skip
+        //     the frame entirely (no trail mutation, no A*) and re-acquire next tick.
+        if (!IsValidPosition(playerPos) || !IsValidPosition(leaderPos))
+        {
+            if ((DateTime.Now - _lastInvalidPosLog).TotalMilliseconds >= 500)
+            {
+                _lastInvalidPosLog = DateTime.Now;
+                AreWeThereYet.Instance.LogMessage(
+                    $"LeaderFollower: invalid position read — skipping tick " +
+                    $"(player={playerPos}, leader={leaderPos}). A failed Pos read " +
+                    $"defaults to Vector3.Zero => grid (0,0) = map corner.");
+            }
+            return FollowResult.Idle;
+        }
+
         // Ensure terrain is populated (throttled to 500 ms, no-op if fresh)
         LineOfSight.EnsureTerrainData();
 

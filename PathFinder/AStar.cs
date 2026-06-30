@@ -24,6 +24,11 @@ public static class AStar
 
     private const float DiagCost = 1.41421356f; // √2
 
+    // Max Chebyshev radius (in cells) to search when snapping an unpathable start/goal
+    // onto walkable terrain. ~10 cells ≈ 108 world units — enough to recover from a
+    // truncation/edge quantisation without silently teleporting the goal across a wall.
+    private const int SnapRadius = 10;
+
     // Tiny tie-break factor applied to the heuristic. Breaks ties between equal-cost
     // paths in favour of the one nearer the goal, nudging the search toward straight
     // lines. Kept small so path length stays effectively optimal.
@@ -53,8 +58,19 @@ public static class AStar
         int cols = terrain[0].Length;
 
         if (!InBounds(startGrid, rows, cols) || !InBounds(goalGrid, rows, cols)) return null;
-        if (!isPathable(terrain[startGrid.Y][startGrid.X])) return null;
-        if (!isPathable(terrain[goalGrid.Y][goalGrid.X])) return null;
+
+        // Snap start/goal onto walkable terrain when they land on an unpathable cell.
+        // (int) truncation in Helper.ToGrid can quantise the leader onto an adjacent
+        // wall cell even while it genuinely stands on walkable ground, and a leader at
+        // the edge of walkable terrain has the same effect. Returning null here makes
+        // the follower falsely assume a portal, so instead we pull the endpoint to the
+        // nearest pathable cell within a small radius.
+        if (!isPathable(terrain[startGrid.Y][startGrid.X]) &&
+            !TrySnapToPathable(terrain, ref startGrid, isPathable, rows, cols, SnapRadius))
+            return null;
+        if (!isPathable(terrain[goalGrid.Y][goalGrid.X]) &&
+            !TrySnapToPathable(terrain, ref goalGrid, isPathable, rows, cols, SnapRadius))
+            return null;
 
         if (startGrid.X == goalGrid.X && startGrid.Y == goalGrid.Y)
             return new List<Vector2i> { startGrid };
@@ -146,4 +162,53 @@ public static class AStar
 
     private static bool InBounds(Vector2i pos, int rows, int cols)
         => pos.X >= 0 && pos.X < cols && pos.Y >= 0 && pos.Y < rows;
+
+    /// <summary>
+    /// Searches outward in expanding Chebyshev rings for the nearest pathable cell and,
+    /// if found within <paramref name="maxRadius"/>, rewrites <paramref name="cell"/> to
+    /// it and returns true. Within a ring the Euclidean-closest candidate wins so the
+    /// snap is as small as possible. Returns false when no pathable cell is in range.
+    /// </summary>
+    private static bool TrySnapToPathable(
+        int[][] terrain,
+        ref Vector2i cell,
+        Func<int, bool> isPathable,
+        int rows,
+        int cols,
+        int maxRadius)
+    {
+        for (int r = 1; r <= maxRadius; r++)
+        {
+            bool found = false;
+            Vector2i best = default;
+            int bestDistSq = int.MaxValue;
+
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                // Only the perimeter of the current ring (closer rings already scanned).
+                if (Math.Max(Math.Abs(dx), Math.Abs(dy)) != r) continue;
+
+                var c = new Vector2i { X = cell.X + dx, Y = cell.Y + dy };
+                if (!InBounds(c, rows, cols)) continue;
+                if (!isPathable(terrain[c.Y][c.X])) continue;
+
+                int distSq = dx * dx + dy * dy;
+                if (distSq < bestDistSq)
+                {
+                    bestDistSq = distSq;
+                    best = c;
+                    found = true;
+                }
+            }
+
+            if (found)
+            {
+                cell = best;
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
