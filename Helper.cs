@@ -50,20 +50,57 @@ public static class Helper
         return cur + Math.Sign(tar - cur) * max;
     }
     
+    /// <summary>
+    /// Projects a world position to a screen click point, guaranteed to land inside
+    /// the game window (inset by <paramref name="edgeBounds"/> pixels).
+    ///
+    /// A target far from the player (e.g. a distant, otherwise-valid trail waypoint)
+    /// commonly projects OFF screen. The old implementation clamped X and Y
+    /// independently against the window rect, which collapses any off-screen point
+    /// to the same fixed corner (windowRect.TopLeft + edgeBounds) regardless of which
+    /// direction the target actually was — sending the character in an arbitrary,
+    /// often wrong, direction. Instead, when the projected point falls outside the
+    /// safe area we pull it straight back along the line from the window CENTER
+    /// (a stand-in for the player's on-screen position, since the camera follows
+    /// them) toward the target, stopping at the safe-area boundary. That keeps the
+    /// click's direction faithful to the real target while guaranteeing it's
+    /// clickable on screen.
+    /// </summary>
     internal static Vector2 WorldToValidScreenPosition(Vector3 worldPos)
     {
         var windowRect = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle();
         var screenPos = Camera.WorldToScreen(worldPos);
         var result = screenPos + windowRect.Location;
 
-        var edgeBounds = 50;
-        if (!windowRect.Intersects(new RectangleF(result.X, result.Y, edgeBounds, edgeBounds)))
-        {
-            if (result.X < windowRect.TopLeft.X) result.X = windowRect.TopLeft.X + edgeBounds;
-            if (result.Y < windowRect.TopLeft.Y) result.Y = windowRect.TopLeft.Y + edgeBounds;
-            if (result.X > windowRect.BottomRight.X) result.X = windowRect.BottomRight.X - edgeBounds;
-            if (result.Y > windowRect.BottomRight.Y) result.Y = windowRect.BottomRight.Y - edgeBounds;
-        }
-        return result;
+        const int edgeBounds = 50;
+        var safeLeft = windowRect.Left + edgeBounds;
+        var safeTop = windowRect.Top + edgeBounds;
+        var safeRight = windowRect.Right - edgeBounds;
+        var safeBottom = windowRect.Bottom - edgeBounds;
+
+        // Already within the safe area — click it as-is, no adjustment needed.
+        if (result.X >= safeLeft && result.X <= safeRight &&
+            result.Y >= safeTop && result.Y <= safeBottom)
+            return result;
+
+        var center = new Vector2(
+            (safeLeft + safeRight) / 2f,
+            (safeTop + safeBottom) / 2f);
+        var halfWidth = (safeRight - safeLeft) / 2f;
+        var halfHeight = (safeBottom - safeTop) / 2f;
+
+        var dir = result - center;
+        if (dir.X == 0f && dir.Y == 0f)
+            return center; // degenerate: target projects onto our own screen position
+
+        // Largest t in (0,1] that keeps (center + dir * t) inside the safe box —
+        // i.e. where the ray from center toward the target first crosses the
+        // boundary. Using the smaller of the two axis limits means we stop at
+        // whichever edge (vertical or horizontal) we'd hit first.
+        var tx = dir.X != 0f ? halfWidth / Math.Abs(dir.X) : float.PositiveInfinity;
+        var ty = dir.Y != 0f ? halfHeight / Math.Abs(dir.Y) : float.PositiveInfinity;
+        var t = Math.Min(1f, Math.Min(tx, ty));
+
+        return center + dir * t;
     }
 }
