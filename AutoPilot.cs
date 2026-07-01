@@ -102,6 +102,25 @@ public class AutoPilot
         }
     }
     
+    /// <summary>
+    /// Strips the trailing "(N)" zone-level suffix the party UI appends to a leader's
+    /// ZoneName (e.g. "The Upper Prison (9)" - the "9" is the zone's monster level, not
+    /// an instance id). GameController.Area.CurrentArea.DisplayName never carries this
+    /// suffix, so a raw string comparison between the two ALWAYS mismatches even when
+    /// we're standing in the exact same zone as the leader - it only goes unnoticed
+    /// because that comparison is normally skipped whenever the leader's entity is still
+    /// visible (followTarget != null). It surfaces the moment the entity disappears
+    /// (e.g. an intra-zone transition to a sub-area like "The Warden's Quarters" that
+    /// doesn't change the zone's display name at all), incorrectly telling us the leader
+    /// zoned to a different area.
+    /// </summary>
+    private static string StripZoneLevelSuffix(string zoneName)
+    {
+        if (string.IsNullOrEmpty(zoneName)) return zoneName ?? "";
+        var match = System.Text.RegularExpressions.Regex.Match(zoneName.Trim(), @"^(.*?)\s*\(\d+\)$");
+        return (match.Success ? match.Groups[1].Value : zoneName.Trim()).ToLowerInvariant();
+    }
+
     private bool IsLeaderZoneInfoReliable(PartyElementWindow leaderPartyElement)
     {
         try
@@ -109,9 +128,9 @@ public class AutoPilot
             // Check if zone name looks valid (not empty, not obviously stale)
             var zoneName = leaderPartyElement.ZoneName;
             var currentZone = AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName;
-            
+
             // Invalid if empty or same as current zone when leader should be elsewhere
-            if (string.IsNullOrEmpty(zoneName) || zoneName.Equals(currentZone))
+            if (string.IsNullOrEmpty(zoneName) || StripZoneLevelSuffix(zoneName).Equals(StripZoneLevelSuffix(currentZone)))
                 return false;
                 
             // Check if zone name changed very recently (might still be updating)
@@ -164,11 +183,15 @@ public class AutoPilot
             }
             else
             {
-                // LEVELING ZONES: Must find the transition that leads to leader's specific zone
-                var leaderZone = leaderPartyElement.ZoneName ?? "";
+                // LEVELING ZONES: Must find the transition that leads to leader's specific zone.
+                // Match against the zone name with its "(N)" zone-level suffix stripped
+                // (see StripZoneLevelSuffix) - RenderName never includes that suffix, so
+                // matching the raw ZoneName (e.g. "The Upper Prison (9)") would never find
+                // the entity for "The Upper Prison".
+                var leaderZone = StripZoneLevelSuffix(leaderPartyElement.ZoneName ?? "");
                 var transitions = allTransitions
                     .Where(x => !string.IsNullOrEmpty(x.RenderName) &&
-                            x.RenderName.ToLower().Contains(leaderZone.ToLower())) // IMPORTANT KEY IMPROVEMENT: Check entity RenderName
+                            x.RenderName.ToLower().Contains(leaderZone)) // IMPORTANT KEY IMPROVEMENT: Check entity RenderName
                     .OrderBy(x => Vector3.Distance(lastTargetPosition, x.Pos))
                     .ToList();
 
@@ -181,7 +204,7 @@ public class AutoPilot
 
                     foreach (var t in allTransitions)
                     {
-                        var matches = t.RenderName?.ToLower().Contains(leaderZone.ToLower()) == true;
+                        var matches = t.RenderName?.ToLower().Contains(leaderZone) == true;
                         AreWeThereYet.Instance.LogMessage($"    Transition: '{t.RenderName}' -> {(matches ? "MATCH" : "No match")}");
                     }
                 }
@@ -625,8 +648,15 @@ public class AutoPilot
             followTarget = GetFollowingTarget();
             var leaderPartyElement = GetLeaderPartyElement();
 
-            if (followTarget == null && !_isTransitioning && leaderPartyElement != null &&
-                !leaderPartyElement.ZoneName.Equals(AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName))
+            // Compare zone names with the "(N)" zone-level suffix stripped off (see
+            // StripZoneLevelSuffix) - the party UI's ZoneName always carries it, our own
+            // CurrentArea.DisplayName never does, so a raw comparison would always treat
+            // us as being in a different zone from the leader even when we're not.
+            var currentZoneDisplayName = AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName;
+            var leaderInSameZone = leaderPartyElement != null &&
+                StripZoneLevelSuffix(leaderPartyElement.ZoneName).Equals(StripZoneLevelSuffix(currentZoneDisplayName));
+
+            if (followTarget == null && !_isTransitioning && leaderPartyElement != null && !leaderInSameZone)
             {
                 // Track zone changes for buffer timing
                 if (!_lastKnownLeaderZone.Equals(leaderPartyElement.ZoneName))
@@ -743,18 +773,18 @@ public class AutoPilot
                     yield return new WaitTime(200); // Wait a bit longer for zone info to stabilize
                 }
             }
-            else if (followTarget == null && !_isTransitioning && leaderPartyElement != null &&
-                     leaderPartyElement.ZoneName.Equals(AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName))
+            else if (followTarget == null && !_isTransitioning && leaderPartyElement != null && leaderInSameZone)
             {
                 // SAME ZONE, LEADER ENTITY MISSING: the leader is reported to be in THIS
                 // zone (otherwise the cross-zone branch above would have handled it), but
                 // their entity can't be found. That's the signature of an intra-zone area
-                // transition: some transitions move you to a different physical area/
-                // instance without changing the displayed zone name, so the name-matching
-                // in GetBestAreaTransitionEntity can't tell us which transition it was.
-                // Finish whatever breadcrumb trail we still have (the leader's last valid
-                // recorded path) first, then once that's exhausted, assume the closest
-                // area transition to where the trail ended is the one they took.
+                // transition: a transition to a physically separate sub-area (e.g. "The
+                // Warden's Quarters") that does NOT change the zone's displayed name, so
+                // the name-matching in GetBestAreaTransitionEntity can't tell us which
+                // transition it was. Finish whatever breadcrumb trail we still have (the
+                // leader's last valid recorded path) first, then once that's exhausted,
+                // assume the closest area transition to where the trail ended is the one
+                // they took.
                 _lastKnownLeaderZone = "";
                 _leaderZoneChangeTime = DateTime.MinValue;
 
