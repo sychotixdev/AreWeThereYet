@@ -38,6 +38,15 @@ public class AutoPilotSettings
     public RangeNode<int> KeepWithinDistance { get; set; } = new(200, 10, 1000);
     public RangeNode<int> TransitionDistance { get; set; } = new(500, 100, 5000);
 
+    [Menu("Transition Click Distance (world units)", "How close we must be to a transition label before clicking it. If further, we walk toward it first.")]
+    public RangeNode<int> TransitionClickDistance { get; set; } = new(150, 20, 500);
+
+    [Menu("Max Transition Click Attempts", "How many times to click the transition label before falling back to the party teleport button.")]
+    public RangeNode<int> MaxTransitionAttempts { get; set; } = new(3, 1, 10);
+
+    [Menu("Transition Wait Time (ms)", "How long to wait for a zone load after clicking a transition before treating the click as failed.")]
+    public RangeNode<int> TransitionWaitTime { get; set; } = new(2500, 500, 10000);
+
     [Menu("Zone Update Buffer (ms)")]
     public RangeNode<int> ZoneUpdateBuffer { get; set; } = new(1000, 500, 5000);
 

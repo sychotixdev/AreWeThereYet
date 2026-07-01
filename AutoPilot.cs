@@ -463,11 +463,19 @@ public class AutoPilot
                     var portal = GetBestPortalLabel(leaderPartyElement);
                     if (portal != null)
                     {
-                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        // Only queue one transition at a time. Without this guard we re-add a
+                        // Transition task every loop iteration (this branch runs whenever the
+                        // leader is in another zone and we aren't mid-transition), piling up
+                        // duplicates - especially now that a failed click clears _isTransitioning
+                        // so we can retry.
+                        if (!tasks.Exists(t => t.Type == TaskNodeType.Transition))
                         {
-                            AreWeThereYet.Instance.LogMessage($"Found reliable portal: {portal.ItemOnGround.Metadata}");
+                            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            {
+                                AreWeThereYet.Instance.LogMessage($"Found reliable portal: {portal.ItemOnGround.Metadata}");
+                            }
+                            tasks.Add(new TaskNode(portal, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
                         }
-                        tasks.Add(new TaskNode(portal, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
                     }
                     else
                     {
@@ -702,23 +710,161 @@ public class AutoPilot
                                 yield return null;
                                 continue;
                             }
-                            
-                            // SET THE FLAG: We are about to change zones.
+
+                            // ---------------------------------------------------------------
+                            // STEP 1: PATH TO THE TRANSITION.
+                            // The click-to-move that a label click triggers uses the GAME'S
+                            // navigation, which snags on walls (the "rubbing against a wall
+                            // that wasn't at the transition" symptom). So if we aren't already
+                            // within clicking range, walk toward the transition ourselves and
+                            // do NOT flag a transition yet - we haven't clicked anything.
+                            // ---------------------------------------------------------------
+                            var portalPos = currentTask.WorldPosition;
+                            var distToPortal = currentTask.LabelOnGround.ItemOnGround.DistancePlayer;
+                            var clickDistance = AreWeThereYet.Instance.Settings.AutoPilot.TransitionClickDistance.Value;
+
+                            if (distToPortal > clickDistance)
+                            {
+                                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                                {
+                                    AreWeThereYet.Instance.LogMessage($"Transition {distToPortal:F0} away (> {clickDistance}) - walking to it before clicking");
+                                }
+
+                                if (AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled &&
+                                    ShouldUseDash(portalPos.WorldToGrid()))
+                                {
+                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(portalPos));
+                                    yield return new WaitTime(random.Next(25) + 30);
+                                    Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.DashKey);
+                                    yield return new WaitTime(random.Next(25) + 30);
+                                }
+                                else
+                                {
+                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(portalPos));
+                                    yield return new WaitTime(random.Next(25) + 30);
+                                    Keyboard.KeyDown(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
+                                    yield return new WaitTime(random.Next(25) + 30);
+                                    Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
+                                }
+
+                                yield return null;
+                                continue;
+                            }
+
+                            // ---------------------------------------------------------------
+                            // STEP 2: CLICK THE LABEL.
+                            // We're in range. Flag the transition (so AreaChange() spawns the
+                            // grace period) and click.
+                            // ---------------------------------------------------------------
+                            currentTask.AttemptCount++;
                             _isTransitioning = true;
                             _transitioningStartTime = DateTime.Now;
+
+                            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            {
+                                AreWeThereYet.Instance.LogMessage($"Clicking transition (attempt {currentTask.AttemptCount}/{AreWeThereYet.Instance.Settings.AutoPilot.MaxTransitionAttempts.Value})");
+                            }
 
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                             yield return new WaitTime(60);
                             yield return Mouse.SetCursorPosAndLeftClickHuman(new Vector2(currentTask.LabelOnGround.Label.GetClientRect().Center.X, currentTask.LabelOnGround.Label.GetClientRect().Center.Y), 100);
-                            yield return new WaitTime(300);
 
-                            currentTask.AttemptCount++;
-                            if (currentTask.AttemptCount > 6)
-                                tasks.RemoveAt(0);
+                            // ---------------------------------------------------------------
+                            // STEP 3: WAIT FOR THE TRANSITION.
+                            // A successful click starts a zone load; AreaChange() then fires,
+                            // which clears the flag (via the grace period) and resets the task
+                            // list. Poll for either signal up to the configured timeout.
+                            // ---------------------------------------------------------------
+                            var waited = 0;
+                            var transitionWait = AreWeThereYet.Instance.Settings.AutoPilot.TransitionWaitTime.Value;
+                            while (waited < transitionWait)
+                            {
+                                if (AreWeThereYet.Instance.GameController.IsLoading || !tasks.Contains(currentTask))
+                                    break;
+                                yield return new WaitTime(100);
+                                waited += 100;
+                            }
+
+                            // Success: a load started or AreaChange() already cleared our task.
+                            if (AreWeThereYet.Instance.GameController.IsLoading || !tasks.Contains(currentTask))
                             {
                                 yield return null;
                                 continue;
                             }
+
+                            // ---------------------------------------------------------------
+                            // STEP 4: CLICK FAILED. Clear the optimistic flag immediately so
+                            // zone detection isn't wedged waiting on the 8s self-heal.
+                            // ---------------------------------------------------------------
+                            _isTransitioning = false;
+
+                            if (currentTask.AttemptCount < AreWeThereYet.Instance.Settings.AutoPilot.MaxTransitionAttempts.Value)
+                            {
+                                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                                {
+                                    AreWeThereYet.Instance.LogMessage("Transition click did not change zones - retrying");
+                                }
+                                yield return null;
+                                continue;
+                            }
+
+                            // ---------------------------------------------------------------
+                            // STEP 5: OUT OF RETRIES. Fall back to the party UI: click the
+                            // leader's teleport/portal icon and accept the travel confirmation.
+                            // ---------------------------------------------------------------
+                            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            {
+                                AreWeThereYet.Instance.LogMessage("Transition clicks exhausted - falling back to party teleport button");
+                            }
+
+                            tasks.RemoveAt(0); // give up on the label
+
+                            var fallbackLeader = GetLeaderPartyElement();
+                            if (fallbackLeader != null)
+                            {
+                                // Flag the transition again: clicking the party TP button also
+                                // triggers a zone load / AreaChange().
+                                _isTransitioning = true;
+                                _transitioningStartTime = DateTime.Now;
+
+                                // A confirmation may already be up.
+                                var tpConfirmPre = GetTpConfirmation();
+                                if (tpConfirmPre != null)
+                                {
+                                    yield return Mouse.SetCursorPosHuman(tpConfirmPre.GetClientRect().Center);
+                                    yield return new WaitTime(200);
+                                    yield return Mouse.LeftClick();
+                                    yield return new WaitTime(1000);
+                                }
+
+                                var fallbackTpButton = GetTpButton(fallbackLeader);
+                                if (!fallbackTpButton.Equals(Vector2.Zero))
+                                {
+                                    yield return Mouse.SetCursorPosHuman(fallbackTpButton, false);
+                                    yield return new WaitTime(200);
+                                    yield return Mouse.LeftClick();
+                                    yield return new WaitTime(500);
+
+                                    // Accept the "travel to this player?" confirmation.
+                                    var tpConfirmPost = GetTpConfirmation();
+                                    if (tpConfirmPost != null)
+                                    {
+                                        yield return Mouse.SetCursorPosHuman(tpConfirmPost.GetClientRect().Center);
+                                        yield return new WaitTime(200);
+                                        yield return Mouse.LeftClick();
+                                        yield return new WaitTime(500);
+                                    }
+                                }
+                                else
+                                {
+                                    // No TP button available - let the flag self-heal so
+                                    // detection resumes rather than staying wedged.
+                                    _isTransitioning = false;
+                                }
+                            }
+
+                            yield return null;
+                            continue;
                         }
 
                     case TaskNodeType.MercenaryOptIn:
