@@ -67,8 +67,18 @@ public static class Helper
     /// click's direction faithful to the real target while guaranteeing it's
     /// clickable on screen.
     /// </summary>
-    internal static Vector2 WorldToValidScreenPosition(Vector3 worldPos)
+    internal static Vector2 WorldToValidScreenPosition(Vector3 worldPos) => WorldToValidScreenPosition(worldPos, out _);
+
+    /// <summary>
+    /// Same as <see cref="WorldToValidScreenPosition(Vector3)"/>, but also reports whether
+    /// the raw projection needed to be pulled in from off (or right at the edge of) the
+    /// safe area. A caller that needs the cursor to land ON a specific world thing (an
+    /// entity's hitbox, not just "roughly the right direction") must treat wasClamped=true
+    /// as "don't trust this point" - clamping guarantees on-screen, not accurate.
+    /// </summary>
+    internal static Vector2 WorldToValidScreenPosition(Vector3 worldPos, out bool wasClamped)
     {
+        wasClamped = false;
         var windowRect = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle();
         var screenPos = Camera.WorldToScreen(worldPos);
         var result = screenPos + windowRect.Location;
@@ -83,6 +93,8 @@ public static class Helper
         if (result.X >= safeLeft && result.X <= safeRight &&
             result.Y >= safeTop && result.Y <= safeBottom)
             return result;
+
+        wasClamped = true;
 
         var center = new Vector2(
             (safeLeft + safeRight) / 2f,
@@ -123,5 +135,41 @@ public static class Helper
         }
 
         return clamped;
+    }
+
+    /// <summary>
+    /// Finds a point on the line from <paramref name="fromWorldPos"/> (the player) to
+    /// <paramref name="toWorldPos"/> (the real target) whose screen projection is reliable -
+    /// i.e. lands in the safe area on its own, without WorldToValidScreenPosition needing to
+    /// pull it in from off-screen. Off-screen or edge-clamped points are still "clickable"
+    /// (clamping guarantees that), but the clamped point can end up nowhere near the actual
+    /// target direction-wise once the true point is far enough outside the window - and if
+    /// the target is elevated well above/below the player (stairs, cliffs, ladders), even a
+    /// close-by target can project off-screen due to camera angle, not distance.
+    ///
+    /// Mirrors LeaderFollower's MaxClickDistance-capped waypoint selection (never click a
+    /// breadcrumb whose projection can't be trusted), but uses the actual screen projection
+    /// as the test instead of a fixed world-distance threshold, and searches along the
+    /// direct line rather than a precomputed trail.
+    ///
+    /// Walks the interpolation fraction down from the target (t=1) toward the player (t=0)
+    /// in <paramref name="steps"/> increments, returning the first reliable point found. If
+    /// none are reliable (player's own position isn't clickable, or off-window), falls back
+    /// to the target's clamped projection so callers always get an on-screen result.
+    /// </summary>
+    internal static (Vector3 WorldPos, Vector2 ScreenPos) GetReliableClickPoint(Vector3 fromWorldPos, Vector3 toWorldPos, int steps = 8)
+    {
+        for (var i = 0; i <= steps; i++)
+        {
+            var t = 1f - i / (float)steps;
+            var candidate = Vector3.Lerp(fromWorldPos, toWorldPos, t);
+            var candidateScreen = WorldToValidScreenPosition(candidate, out var candidateClamped);
+            if (!candidateClamped)
+                return (candidate, candidateScreen);
+        }
+
+        // Nothing along the line was clean - fall back to the target's clamped projection
+        // so the caller still gets a valid on-screen point (just an untrustworthy one).
+        return (toWorldPos, WorldToValidScreenPosition(toWorldPos));
     }
 }

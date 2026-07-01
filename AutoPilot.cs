@@ -311,25 +311,32 @@ public class AutoPilot
     }
 
     /// <summary>
-    /// Finds a clickable button for whatever confirmation popup is currently open, if any -
-    /// the known "are you sure you want to teleport" Yes/No dialog, or a generic single-button
+    /// Finds a click point for whatever confirmation popup is currently open, if any - the
+    /// known "are you sure you want to teleport" Yes/No dialog, or a generic single-button
     /// (e.g. "OK") area-entry confirmation. While either is open the game won't register
     /// mouseover/targeting on world entities, so this must be checked and dismissed before
     /// transition-targeting logic can make progress.
+    ///
+    /// Returns the click position (not the Element) computed entirely inside the try/catch:
+    /// the popup element can go stale between "we found it" and "we read its rect" (it can
+    /// close mid-tick, e.g. from a previous click landing late), and GetClientRect() on a
+    /// stale/freed element is an unguarded memory read that can throw and kill the whole
+    /// AutoPilot coroutine - which is worse than missing one dismiss attempt.
     /// </summary>
-    private Element GetOpenPopupButton()
+    private Vector2? GetOpenPopupClickPosition()
     {
-        var tpConfirm = GetTpConfirmation();
-        if (tpConfirm != null)
-            return tpConfirm;
-
         try
         {
+            var tpConfirm = GetTpConfirmation();
+            if (tpConfirm != null)
+                return tpConfirm.GetClientRect().Center;
+
             var ui = AreWeThereYet.Instance.GameController?.IngameState?.IngameUi?.PopUpWindow;
             if (ui == null || !ui.IsVisible)
                 return null;
 
-            return FindButtonByText(ui, "OK");
+            var okButton = FindButtonByText(ui, "OK");
+            return okButton?.GetClientRect().Center;
         }
         catch
         {
@@ -384,10 +391,13 @@ public class AutoPilot
         _transitioningStartTime = DateTime.Now;
 
         // A confirmation may already be up.
-        var tpConfirmPre = GetTpConfirmation();
-        if (tpConfirmPre != null)
+        var prePos = GetOpenPopupClickPosition();
+        if (prePos != null)
         {
-            yield return Mouse.SetCursorPosHuman(tpConfirmPre.GetClientRect().Center);
+            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                AreWeThereYet.Instance.LogMessage("FallbackToPartyTeleport: dismissing pre-existing popup");
+
+            yield return Mouse.SetCursorPosHuman(prePos.Value);
             yield return new WaitTime(200);
             yield return Mouse.LeftClick();
             yield return new WaitTime(1000);
@@ -396,19 +406,36 @@ public class AutoPilot
         var fallbackTpButton = GetTpButton(fallbackLeader);
         if (!fallbackTpButton.Equals(Vector2.Zero))
         {
+            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                AreWeThereYet.Instance.LogMessage("FallbackToPartyTeleport: clicking party TP button");
+
             yield return Mouse.SetCursorPosHuman(fallbackTpButton, false);
             yield return new WaitTime(200);
             yield return Mouse.LeftClick();
-            yield return new WaitTime(500);
 
-            // Accept the "travel to this player?" confirmation.
-            var tpConfirmPost = GetTpConfirmation();
-            if (tpConfirmPost != null)
+            // Accept the "travel to this player?" confirmation. Poll for a bit rather
+            // than checking once - the dialog can take a moment to render, and a missed
+            // check here leaves it open, silently blocking world-entity targeting for
+            // everything afterward.
+            var confirmWaited = 0;
+            const int confirmTimeoutMs = 2000;
+            while (confirmWaited < confirmTimeoutMs)
             {
-                yield return Mouse.SetCursorPosHuman(tpConfirmPost.GetClientRect().Center);
+                yield return new WaitTime(150);
+                confirmWaited += 150;
+
+                var postPos = GetOpenPopupClickPosition();
+                if (postPos == null)
+                    continue;
+
+                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                    AreWeThereYet.Instance.LogMessage("FallbackToPartyTeleport: dismissing post-click confirmation");
+
+                yield return Mouse.SetCursorPosHuman(postPos.Value);
                 yield return new WaitTime(200);
                 yield return Mouse.LeftClick();
                 yield return new WaitTime(500);
+                break;
             }
         }
         else
@@ -928,15 +955,15 @@ public class AutoPilot
                             // the game won't register mouseover/targeting on world entities - so
                             // the "not targeted" wait in STEP 2 would spin forever without this.
                             // ---------------------------------------------------------------
-                            var openPopup = GetOpenPopupButton();
-                            if (openPopup != null)
+                            var popupClickPos = GetOpenPopupClickPosition();
+                            if (popupClickPos != null)
                             {
                                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                                 {
                                     AreWeThereYet.Instance.LogMessage("Dismissing open popup before continuing transition");
                                 }
 
-                                yield return Mouse.SetCursorPosHuman(openPopup.GetClientRect().Center);
+                                yield return Mouse.SetCursorPosHuman(popupClickPos.Value);
                                 yield return new WaitTime(150);
                                 yield return Mouse.LeftClick();
                                 yield return new WaitTime(300);
@@ -955,46 +982,69 @@ public class AutoPilot
                             // Do NOT flag a transition yet - we haven't clicked anything.
                             // ---------------------------------------------------------------
                             var portalPos = currentTask.WorldPosition;
+                            var entityHoverPos = transitionEntity.BoundsCenterPosNum;
                             var distToPortal = transitionEntity.DistancePlayer;
                             var clickDistance = AreWeThereYet.Instance.Settings.AutoPilot.TransitionClickDistance.Value;
                             var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
 
-                            if (distToPortal > clickDistance)
+                            // Screen-projection reliability for the entity's own hover point,
+                            // checked up front: a vertical zone (stairs/cliffs/ladders) can put
+                            // the entity within clickDistance while its projection still lands
+                            // off-screen because of camera angle/elevation, not distance. Both
+                            // gates below (whether to walk closer, and whether "arrived" from
+                            // the navigator is trustworthy) need this.
+                            Helper.WorldToValidScreenPosition(entityHoverPos, out var entityScreenUnreliable);
+
+                            if (distToPortal > clickDistance || entityScreenUnreliable)
                             {
                                 // Ask the shared navigator for the next waypoint toward the
                                 // portal (trail-follow enabled: the trail leads to it). Falls
                                 // back to walking straight at the portal if pathfinding is off.
                                 var moveTarget = portalPos;
-                                if (pfEnabled)
+                                if (pfEnabled && distToPortal > clickDistance)
                                 {
                                     var nav = AreWeThereYet.Instance.leaderFollower.NavigateTo(
                                         AreWeThereYet.Instance.playerPosition, portalPos,
                                         allowTrailFollow: true, arriveWithin: clickDistance);
 
                                     // Idle == the navigator considers us arrived (in range + LOS);
-                                    // fall through to the click. Otherwise walk to its waypoint.
+                                    // only fall through to the click if the projection is ALSO
+                                    // reliable - "arrived" by distance doesn't mean "on screen".
                                     if (nav.Type != FollowResultType.Idle)
                                         moveTarget = nav.WorldPosition;
-                                    else
+                                    else if (!entityScreenUnreliable)
                                         goto DoTransitionClick;
                                 }
+                                // else: already within clickDistance, so we're only here because
+                                // the entity's projection is unreliable - approach it directly
+                                // (moveTarget stays portalPos) to get a cleaner camera angle.
 
                                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                                 {
-                                    AreWeThereYet.Instance.LogMessage($"Transition {distToPortal:F0} away (> {clickDistance}) - walking to it before clicking");
+                                    AreWeThereYet.Instance.LogMessage(distToPortal > clickDistance
+                                        ? $"Transition {distToPortal:F0} away (> {clickDistance}) - walking to it before clicking"
+                                        : "Transition in range but projects off-screen (likely elevation change) - approaching for a cleaner angle");
                                 }
+
+                                // Click an intermediate point that's reliably on-screen rather
+                                // than the raw (possibly off-screen, clamped-to-the-wrong-spot)
+                                // moveTarget. Mirrors LeaderFollower's MaxClickDistance-capped
+                                // waypoint selection, but driven by the actual screen
+                                // projection instead of a fixed world-distance threshold.
+                                var (_, moveClickScreenPos) = Helper.GetReliableClickPoint(
+                                    AreWeThereYet.Instance.playerPosition, moveTarget);
 
                                 if (AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled &&
                                     ShouldUseDash(moveTarget.WorldToGrid()))
                                 {
-                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(moveTarget));
+                                    yield return Mouse.SetCursorPosHuman(moveClickScreenPos);
                                     yield return new WaitTime(random.Next(25) + 30);
                                     Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.DashKey);
                                     yield return new WaitTime(random.Next(25) + 30);
                                 }
                                 else
                                 {
-                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(moveTarget));
+                                    yield return Mouse.SetCursorPosHuman(moveClickScreenPos);
                                     yield return new WaitTime(random.Next(25) + 30);
                                     Keyboard.KeyDown(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                                     yield return new WaitTime(random.Next(25) + 30);
@@ -1019,10 +1069,16 @@ public class AutoPilot
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                             yield return new WaitTime(60);
 
-                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.BoundsCenterPos);
+                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.BoundsCenterPosNum, out var transitionScreenClamped);
                             var targetable = transitionEntity.GetComponent<Targetable>();
 
-                            if (targetable == null || !targetable.isTargeted)
+                            // We can arrive here via the goto above without having walked at
+                            // all this tick, so the projection can still be unreliable (e.g.
+                            // the entity shifted position between checks, or the earlier
+                            // "reliable" read this tick was a hair off). Fold that into the
+                            // same wait/timeout path as "not targeted" rather than clicking
+                            // a point we already know we can't trust.
+                            if (transitionScreenClamped || targetable == null || !targetable.isTargeted)
                             {
                                 // Not targeted yet. Track how long we've been waiting - if the
                                 // entity never becomes targetable (bad hover point, occluded,
