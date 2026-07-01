@@ -358,6 +358,16 @@ public class LeaderFollower
                         foreach (var g in smoothed)
                             _trail.Add(Helper.ToWorld(g));
 
+                        // SmoothGridPath's string-pull deliberately collapses long straight,
+                        // open stretches into a single anchor-to-anchor jump - exactly the
+                        // segment TrailScan's MaxClickDistance cap has no in-range candidate
+                        // for. Without subdividing, that gap would just stall (bestIdx=-1
+                        // every tick) instead of walking through it. Fill any over-length gap
+                        // with evenly spaced intermediate waypoints before pruning/consuming.
+                        int subdivided = SubdivideLongSegments();
+                        if (LogEnabled && subdivided > 0)
+                            DebugLog($"Subdivided {subdivided} long segment(s) -> trailCount={_trail.Count}");
+
                         // The path (and its leading point, path[0]) was computed from the
                         // player's grid position AT REQUEST TIME. The search runs on a
                         // background thread, so by the time it completes the player has
@@ -420,9 +430,18 @@ public class LeaderFollower
         else
         {
             int clearance = PfSettings.PathClearance.Value;
+            int maxClickDistance = PfSettings.MaxClickDistance.Value;
             int bestIdx = -1;
             for (int i = _trail.Count - 1; i >= 0; i--)
             {
+                // Cap the click target's distance: Camera.WorldToScreen() produces
+                // wrong-direction garbage for points beyond reliable projection range
+                // (see ScreenClamp diagnostics/MaxClickDistance comment), so a distant
+                // waypoint must never be selected here even when the straight line to
+                // it is fully walkable on an open map.
+                if (Vector3.Distance(playerPos, _trail[i]) > maxClickDistance)
+                    continue;
+
                 if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], clearance))
                 {
                     bestIdx = i;
@@ -446,6 +465,9 @@ public class LeaderFollower
             {
                 for (int i = _trail.Count - 1; i >= 0; i--)
                 {
+                    if (Vector3.Distance(playerPos, _trail[i]) > maxClickDistance)
+                        continue;
+
                     if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], 0))
                     {
                         bestIdx = i;
@@ -544,6 +566,49 @@ public class LeaderFollower
             if (_trail.Count > max)
                 _trail.RemoveRange(0, _trail.Count - max);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Trail densification (cap segment length for click-target safety)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Inserts evenly spaced intermediate waypoints into any consecutive _trail pair
+    /// whose distance exceeds PfSettings.MaxClickDistance. TrailScan refuses to select a
+    /// click target beyond that cap (Camera.WorldToScreen() is unreliable past it - see
+    /// MaxClickDistance's setting comment), so an anchor-to-anchor gap longer than the
+    /// cap must be filled here or it becomes a dead zone with no valid candidate at all.
+    /// Returns the number of segments that needed subdividing (0 = no-op), purely for
+    /// diagnostics.
+    /// </summary>
+    private int SubdivideLongSegments()
+    {
+        int maxDist = PfSettings.MaxClickDistance.Value;
+        int subdividedSegments = 0;
+
+        for (int i = 0; i < _trail.Count - 1; i++)
+        {
+            var a = _trail[i];
+            var b = _trail[i + 1];
+            float segDist = Vector3.Distance(a, b);
+            if (segDist <= maxDist) continue;
+
+            subdividedSegments++;
+            int steps = (int)Math.Ceiling(segDist / maxDist);
+            for (int s = 1; s < steps; s++)
+            {
+                float t = (float)s / steps;
+                var interpXY = new Vector3(
+                    a.X + (b.X - a.X) * t,
+                    a.Y + (b.Y - a.Y) * t,
+                    0);
+                var g = Helper.ToGrid(interpXY);
+                _trail.Insert(i + s, Helper.ToWorld(g));
+            }
+            i += steps - 1; // skip past the points we just inserted
+        }
+
+        return subdividedSegments;
     }
 
     // -----------------------------------------------------------------------

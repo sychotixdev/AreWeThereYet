@@ -88,6 +88,19 @@ public class AutoPilotSettings
 
         [Menu("A* Recompute Cooldown (ms, min time between background searches)")]
         public RangeNode<int> AstarRecomputeIntervalMs { get; set; } = new(750, 100, 5000);
+
+        // Camera.WorldToScreen() produces garbage (wildly out-of-range, direction-
+        // incorrect coordinates) for world points far from the player - confirmed via
+        // [ATY-PF] ScreenClamp logging: rawScreen values in the thousands, with a
+        // constant/wrong bearing regardless of the true target direction, for any
+        // click target beyond roughly this range. TrailScan's backward scan otherwise
+        // greedily picks the FARTHEST walkable-line-reachable trail point, which on an
+        // open map can be thousands of units away - clicking a target the camera can't
+        // reliably project sends the character in an arbitrary (often reversed)
+        // direction. Capping the scan keeps every click target within a range the
+        // projection is known to handle correctly.
+        [Menu("Max Click Distance (world units, cap on TrailScan target selection)")]
+        public RangeNode<int> MaxClickDistance { get; set; } = new(1200, 200, 3000);
     }
 
     [Submenu(CollapsedByDefault = true)]
