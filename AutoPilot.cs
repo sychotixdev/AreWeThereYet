@@ -13,6 +13,7 @@ using SharpDX;
 using AreWeThereYet.Utils;
 using AreWeThereYet.PathFinder;
 using System.Windows.Forms;
+using System.Threading;
 
 namespace AreWeThereYet;
 
@@ -254,6 +255,46 @@ public class AutoPilot
         {
             AreWeThereYet.Instance.LogError($"GetClosestAreaTransitionEntity failed: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Probes whether <paramref name="clickedWorldPos"/> is still walkably connected to
+    /// our current position. This is the success signal for an intra-zone transition
+    /// (a sub-area whose display name never changes): those don't reload the terrain
+    /// buffer (confirmed same Area, same array before/after) and never fire
+    /// AreaChange(), so IsLoading and tasks.Contains(currentTask) never flip - the
+    /// normal STEP 3 success check has nothing to observe. But the sub-room we land in
+    /// is a disconnected pocket of that same terrain (only joined by the scripted
+    /// transition, not by walkable ground), so once we've actually gone through, A* can
+    /// no longer path from here back to the point we clicked. Returns false (treat as
+    /// "still connected" - keep waiting/retrying) whenever terrain isn't available or
+    /// the search is inconclusive, so we never falsely claim success.
+    /// </summary>
+    private bool IsDisconnectedFromClickPoint(Vector3 clickedWorldPos)
+    {
+        try
+        {
+            var lineOfSight = AreWeThereYet.Instance.lineOfSight;
+            lineOfSight.EnsureTerrainData();
+            var terrain = lineOfSight.GetTerrainData();
+            if (terrain == null) return false;
+
+            var startGrid = Helper.ToGrid(AreWeThereYet.Instance.playerPosition);
+            var goalGrid = Helper.ToGrid(clickedWorldPos);
+            Func<int, bool> isPathable = v => v is 1 or 5;
+
+            var result = AStar.FindPath(
+                terrain, startGrid, goalGrid, isPathable,
+                AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.NodeBudget.Value,
+                CancellationToken.None);
+
+            return result.Outcome == PathOutcome.Unreachable;
+        }
+        catch (Exception ex)
+        {
+            AreWeThereYet.Instance.LogError($"IsDisconnectedFromClickPoint failed: {ex.Message}");
+            return false;
         }
     }
 
@@ -1256,23 +1297,44 @@ public class AutoPilot
 
                             // ---------------------------------------------------------------
                             // STEP 3: WAIT FOR THE TRANSITION.
-                            // A successful click starts a zone load; AreaChange() then fires,
+                            // A cross-zone click starts a real load; AreaChange() then fires,
                             // which clears the flag (via the grace period) and resets the task
-                            // list. Poll for either signal up to the configured timeout.
+                            // list. An intra-zone click (sub-area, same display name) does
+                            // neither of those - it never triggers AreaChange() at all - so we
+                            // also probe reachability back to the click point as a third signal
+                            // (see IsDisconnectedFromClickPoint).
                             // ---------------------------------------------------------------
                             var waited = 0;
                             var transitionWait = AreWeThereYet.Instance.Settings.AutoPilot.TransitionWaitTime.Value;
+                            var clickedWorldPos = transitionEntity.BoundsCenterPos;
                             while (waited < transitionWait)
                             {
-                                if (AreWeThereYet.Instance.GameController.IsLoading || !tasks.Contains(currentTask))
+                                if (AreWeThereYet.Instance.GameController.IsLoading || !tasks.Contains(currentTask) ||
+                                    IsDisconnectedFromClickPoint(clickedWorldPos))
                                     break;
                                 yield return new WaitTime(100);
                                 waited += 100;
                             }
 
-                            // Success: a load started or AreaChange() already cleared our task.
+                            // Success: a load started, AreaChange() already cleared our task, or
+                            // we're now in a disconnected pocket of the same terrain (intra-zone).
                             if (AreWeThereYet.Instance.GameController.IsLoading || !tasks.Contains(currentTask))
                             {
+                                yield return null;
+                                continue;
+                            }
+
+                            if (IsDisconnectedFromClickPoint(clickedWorldPos))
+                            {
+                                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                                {
+                                    AreWeThereYet.Instance.LogMessage("Transition succeeded (intra-zone - click point now unreachable; AreaChange() won't fire for this one)");
+                                }
+
+                                // AreaChange()/PostTransitionGracePeriod never runs for this case,
+                                // so nothing else will clear the flag or drop this task - do it here.
+                                _isTransitioning = false;
+                                tasks.RemoveAt(0);
                                 yield return null;
                                 continue;
                             }
