@@ -77,7 +77,7 @@ public static class Mouse
         if (limited)
         {
             if (targetPos.X <= windowRect.Left + edgeBoundsX ) targetPos.X = windowRect.Left + edgeBoundsX;
-            if (targetPos.Y <= windowRect.Top + edgeBoundsY) targetPos.Y = windowRect.Left + edgeBoundsY;
+            if (targetPos.Y <= windowRect.Top + edgeBoundsY) targetPos.Y = windowRect.Top + edgeBoundsY;
             if (targetPos.X >= windowRect.Right - edgeBoundsX) targetPos.X = windowRect.Right -edgeBoundsX;
             if (targetPos.Y >= windowRect.Bottom - edgeBoundsY) targetPos.Y = windowRect.Bottom - edgeBoundsY;
         }
