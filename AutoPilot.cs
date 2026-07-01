@@ -982,7 +982,7 @@ public class AutoPilot
                             // Do NOT flag a transition yet - we haven't clicked anything.
                             // ---------------------------------------------------------------
                             var portalPos = currentTask.WorldPosition;
-                            var entityHoverPos = transitionEntity.BoundsCenterPosNum;
+                            var entityHoverPos = transitionEntity.BoundsCenterPos;
                             var distToPortal = transitionEntity.DistancePlayer;
                             var clickDistance = AreWeThereYet.Instance.Settings.AutoPilot.TransitionClickDistance.Value;
                             var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
@@ -1069,7 +1069,7 @@ public class AutoPilot
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                             yield return new WaitTime(60);
 
-                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.BoundsCenterPosNum, out var transitionScreenClamped);
+                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.BoundsCenterPos, out var transitionScreenClamped);
                             var targetable = transitionEntity.GetComponent<Targetable>();
 
                             // We can arrive here via the goto above without having walked at
