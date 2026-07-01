@@ -749,22 +749,33 @@ namespace AreWeThereYet.Utils
         /// shortcutting so the follower never cuts a path across a see-through-but-
         /// unwalkable gap (e.g. a cliff). No refresh, no debug side-effects.
         /// </summary>
-        public bool HasWalkableLineRaw(SharpDX.Vector3 worldStart, SharpDX.Vector3 worldEnd)
+        public bool HasWalkableLineRaw(SharpDX.Vector3 worldStart, SharpDX.Vector3 worldEnd, int clearance = 0)
         {
             if (_terrainData == null) return false;
             var gs = Helper.ToGrid(worldStart);
             var ge = Helper.ToGrid(worldEnd);
             return HasWalkableLineInternal(
                 new Vector2(gs.X, gs.Y),
-                new Vector2(ge.X, ge.Y));
+                new Vector2(ge.X, ge.Y),
+                clearance);
         }
 
         /// <summary>
-        /// Walkability-only DDA traversal. A cell is walkable only when it is neither
-        /// blocked (0) nor dashable/ranged-only (2). Mirrors the LOS DDA stepping but
-        /// with strict walkable semantics and no debug mutation.
+        /// Walkability-only DDA traversal with an optional clearance band ("thick
+        /// raycast"). A cell is walkable only when it is neither blocked (0) nor
+        /// dashable/ranged-only (2).
+        ///
+        /// When <paramref name="clearance"/> &gt; 0 each sampled centre cell must also be
+        /// clear for <paramref name="clearance"/> cells to either side, measured
+        /// perpendicular to the direction of travel. This sweeps the character's body
+        /// half-width along the line so a straight segment is only accepted when the body
+        /// actually fits — fixing the "grazes a wall corner and wedges" failure in narrow
+        /// corridors where a zero-width ray threaded between walls the body can't clear.
+        ///
+        /// Diagonal steps additionally require both orthogonal bridge cells to be walkable
+        /// so the line can't slip diagonally through the corner of a wall.
         /// </summary>
-        private bool HasWalkableLineInternal(Vector2 start, Vector2 end)
+        private bool HasWalkableLineInternal(Vector2 start, Vector2 end, int clearance = 0)
         {
             var startX = (int)start.X;
             var startY = (int)start.Y;
@@ -782,12 +793,35 @@ namespace AreWeThereYet.Utils
             var stepX = startX < endX ? 1 : -1;
             var stepY = startY < endY ? 1 : -1;
 
+            // Perpendicular unit vector (rounded per-offset below) for the clearance band.
+            // perp = normalize((-dyVec, dxVec)); zero-length when start == end.
+            double len = Math.Sqrt((double)dx * dx + (double)dy * dy);
+            double perpX = len > 0 ? -(endY - startY) / len : 0.0;
+            double perpY = len > 0 ?  (endX - startX) / len : 0.0;
+
+            // A sampled centre cell is "clear" when it and its ±clearance perpendicular
+            // neighbours are all walkable.
+            bool BandClear(int cx, int cy)
+            {
+                if (!IsTerrainWalkable(new Vector2(cx, cy))) return false;
+                for (int k = 1; k <= clearance; k++)
+                {
+                    int ox = (int)Math.Round(perpX * k);
+                    int oy = (int)Math.Round(perpY * k);
+                    if (!IsTerrainWalkable(new Vector2(cx + ox, cy + oy))) return false;
+                    if (!IsTerrainWalkable(new Vector2(cx - ox, cy - oy))) return false;
+                }
+                return true;
+            }
+
+            if (!BandClear(x, y)) return false;
+
             if (dx == 0)
             {
                 for (var i = 0; i < dy; i++)
                 {
                     y += stepY;
-                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                    if (!BandClear(x, y)) return false;
                 }
                 return true;
             }
@@ -797,41 +831,50 @@ namespace AreWeThereYet.Utils
                 for (var i = 0; i < dx; i++)
                 {
                     x += stepX;
-                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                    if (!BandClear(x, y)) return false;
                 }
                 return true;
             }
 
-            var deltaErr = Math.Abs((float)dy / dx);
             var error = 0.0f;
 
             if (dx >= dy)
             {
+                var deltaErr = (float)dy / dx;
                 for (var i = 0; i < dx; i++)
                 {
                     x += stepX;
                     error += deltaErr;
                     if (error >= 0.5f)
                     {
+                        // Diagonal step from (x-stepX, y) to (x, y+stepY): reject if it
+                        // cuts a wall corner — both orthogonal bridge cells must be clear.
+                        if (!IsTerrainWalkable(new Vector2(x - stepX, y + stepY)) ||
+                            !IsTerrainWalkable(new Vector2(x, y)))
+                            return false;
                         y += stepY;
                         error -= 1.0f;
                     }
-                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                    if (!BandClear(x, y)) return false;
                 }
             }
             else
             {
-                deltaErr = Math.Abs((float)dx / dy);
+                var deltaErr = (float)dx / dy;
                 for (var i = 0; i < dy; i++)
                 {
                     y += stepY;
                     error += deltaErr;
                     if (error >= 0.5f)
                     {
+                        // Diagonal step from (x, y-stepY) to (x+stepX, y): same corner test.
+                        if (!IsTerrainWalkable(new Vector2(x + stepX, y - stepY)) ||
+                            !IsTerrainWalkable(new Vector2(x, y)))
+                            return false;
                         x += stepX;
                         error -= 1.0f;
                     }
-                    if (!IsTerrainWalkable(new Vector2(x, y))) return false;
+                    if (!BandClear(x, y)) return false;
                 }
             }
 
@@ -839,14 +882,14 @@ namespace AreWeThereYet.Utils
         }
 
         /// <summary>
-        /// Grid-space walkability check between two cells. Used to smooth (string-pull)
-        /// the raw A* grid path so collinear/diagonal runs collapse into straight
-        /// segments instead of "right then up" staircases.
+        /// Grid-space walkability check between two cells with optional clearance. Used to
+        /// smooth (string-pull) the raw A* grid path so collinear/diagonal runs collapse
+        /// into straight segments instead of "right then up" staircases.
         /// </summary>
-        public bool HasWalkableLineGrid(Vector2i a, Vector2i b)
+        public bool HasWalkableLineGrid(Vector2i a, Vector2i b, int clearance = 0)
         {
             if (_terrainData == null) return false;
-            return HasWalkableLineInternal(new Vector2(a.X, a.Y), new Vector2(b.X, b.Y));
+            return HasWalkableLineInternal(new Vector2(a.X, a.Y), new Vector2(b.X, b.Y), clearance);
         }
 
         /// <summary>

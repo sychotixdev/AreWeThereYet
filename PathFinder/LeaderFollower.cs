@@ -339,10 +339,11 @@ public class LeaderFollower
         //    route, not a route to an arbitrary point.
         if (allowTrailFollow)
         {
+            int clearance = PfSettings.PathClearance.Value;
             int bestIdx = -1;
             for (int i = _trail.Count - 1; i >= 0; i--)
             {
-                if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i]))
+                if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], clearance))
                 {
                     bestIdx = i;
                     break;
@@ -429,13 +430,14 @@ public class LeaderFollower
 
         var result = new List<Vector2i> { path[0] };
         int anchor = 0;
+        int clearance = PfSettings.PathClearance.Value;
 
         while (anchor < path.Count - 1)
         {
             int next = anchor + 1; // guaranteed progress (adjacent cells are walkable)
             for (int j = path.Count - 1; j > anchor; j--)
             {
-                if (LineOfSight.HasWalkableLineGrid(path[anchor], path[j]))
+                if (LineOfSight.HasWalkableLineGrid(path[anchor], path[j], clearance))
                 {
                     next = j;
                     break;
