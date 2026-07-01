@@ -391,8 +391,8 @@ public class AutoPilot
         {
             var ui = AreWeThereYet.Instance.GameController?.IngameState?.IngameUi?.PopUpWindow;
 
-            if (ui.Children[0].Children[0].Children[0].Text.Equals("Are you sure you want to teleport to this player's location?"))
-                return ui.Children[0].Children[0].Children[3].Children[0];
+            if (ui.GetChildFromIndices(0,0,0)?.Text.Equals("Are you sure you want to teleport to this player's location?") == true)
+                return ui.TwoButtonWindowOk;
 
             return null;
         }
