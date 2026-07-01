@@ -334,8 +334,26 @@ public class LeaderFollower
                     bool needsRefresh = _trail.Count <= 1 || _portalSuspected || _trailUnreachableThisTick;
                     if (needsRefresh)
                     {
+                        if (LogEnabled && gridPath.Count >= 2)
+                        {
+                            var rf = gridPath[0]; var rs = gridPath[1];
+                            var rl = gridPath[^2]; var re = gridPath[^1];
+                            DebugLog($"RawPath first({rf.X},{rf.Y}) second({rs.X},{rs.Y}) " +
+                                     $"last({rl.X},{rl.Y}) end({re.X},{re.Y}) " +
+                                     $"[refresh: count<=1={_trail.Count <= 1} portal={_portalSuspected} unreachable={_trailUnreachableThisTick}]");
+                        }
+
                         var smoothed = SmoothGridPath(gridPath);
                         var oldTarget = _trail.Count > 0 ? _trail[0] : (Vector3?)null;
+
+                        if (LogEnabled && smoothed.Count > 0)
+                        {
+                            var a0 = smoothed[0];
+                            var a1 = smoothed[Math.Min(1, smoothed.Count - 1)];
+                            var brg = Math.Atan2(a1.Y - a0.Y, a1.X - a0.X) * 180.0 / Math.PI;
+                            DebugLog($"Anchor1({a1.X},{a1.Y}) brg={brg:F0}");
+                        }
+
                         _trail.Clear();
                         foreach (var g in smoothed)
                             _trail.Add(Helper.ToWorld(g));
@@ -357,8 +375,11 @@ public class LeaderFollower
                         {
                             DebugLog(FormatSearch(res, gridPath.Count, smoothed.Count));
                             if (oldTarget is Vector3 ot && _trail.Count > 0)
+                            {
+                                var newBrg = Math.Atan2(_trail[0].Y - playerPos.Y, _trail[0].X - playerPos.X) * 180.0 / Math.PI;
                                 DebugLog($"Trail replaced: old target world({ot.X:F0},{ot.Y:F0}) -> " +
-                                          $"new target world({_trail[0].X:F0},{_trail[0].Y:F0})");
+                                          $"new target world({_trail[0].X:F0},{_trail[0].Y:F0}) newBrg={newBrg:F0}");
+                            }
                         }
                     }
                     else if (LogEnabled)
