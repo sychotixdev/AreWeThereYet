@@ -326,9 +326,23 @@ public class LeaderFollower
             _searchTask = null;
         }
 
-        // 4. Prune trail points we've already reached.
+        // 4. Prune trail points we've already reached OR passed.
+        //    (a) Reached: within ReachedBounds of us.
+        //    (b) Passed: the trail is rebuilt from JPS every tick with _trail[0] = the
+        //        start cell (where we were last tick). Once we advance, that start point
+        //        sits BEHIND us but is still further than ReachedBounds, so (a) leaves it
+        //        in place. Step 5 could then string-pull back to it whenever the forward
+        //        line is briefly blocked (e.g. a doorway narrower than the clearance
+        //        band), walking us backward — then forward clears next tick and we bounce
+        //        left/right in place. We treat _trail[0] as passed when we are closer to
+        //        the NEXT point than _trail[0] is: that means we're already on the far
+        //        side of it along the route. This only prunes points behind us, so it is
+        //        safe for legitimate "move away from the goal to round an obstacle" motion.
         int reachedBounds = PfSettings.ReachedBounds.Value;
         while (_trail.Count > 0 && Vector3.Distance(playerPos, _trail[0]) <= reachedBounds)
+            _trail.RemoveAt(0);
+        while (_trail.Count >= 2 &&
+               Vector3.Distance(playerPos, _trail[1]) <= Vector3.Distance(_trail[0], _trail[1]))
             _trail.RemoveAt(0);
 
         // 5. Is any part of the route reachable by a straight WALKABLE line? Walkability

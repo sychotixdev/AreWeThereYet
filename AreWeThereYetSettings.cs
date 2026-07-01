@@ -83,8 +83,8 @@ public class AutoPilotSettings
         [Menu("A* Node Budget (cap per search)")]
         public RangeNode<int> NodeBudget { get; set; } = new(50000, 1000, 500000);
 
-        [Menu("Path Clearance (grid cells, character half-width, ~2)")]
-        public RangeNode<int> PathClearance { get; set; } = new(2, 0, 6);
+        [Menu("Path Clearance (grid cells, character half-width, ~1)")]
+        public RangeNode<int> PathClearance { get; set; } = new(1, 0, 6);
     }
 
     [Submenu(CollapsedByDefault = true)]
