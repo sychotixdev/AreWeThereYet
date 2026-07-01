@@ -36,6 +36,13 @@ public class AutoPilot
     private DateTime _transitioningStartTime = DateTime.MinValue;
     private static readonly TimeSpan TransitioningStuckTimeout = TimeSpan.FromSeconds(8);
 
+    // Movement-execution diagnostics: confirms whether input we send is actually
+    // landing in-game (player position changing) or whether we're clicking/holding
+    // the move key into a spot the character can't actually reach (blocked geometry,
+    // an off-screen click target, etc.) as opposed to a pathing/logic issue upstream.
+    private Vector3 _lastMoveDiagPos = Vector3.Zero;
+    private DateTime _lastMoveDiagLog = DateTime.MinValue;
+
     // Tracks liveness across ticks so we can detect death → respawn (e.g. release to
     // checkpoint), which does not fire an area change and would otherwise leave a
     // stale breadcrumb trail in place.
@@ -698,6 +705,27 @@ public class AutoPilot
                 switch (currentTask.Type)
                 {
                     case TaskNodeType.Movement:
+                        if (AreWeThereYet.Instance.Settings.Debug.LogPathfinding.Value)
+                        {
+                            var now = DateTime.Now;
+                            if ((now - _lastMoveDiagLog).TotalMilliseconds >= AreWeThereYet.Instance.Settings.Debug.PathfindingLogInterval.Value)
+                            {
+                                _lastMoveDiagLog = now;
+                                var curPos = AreWeThereYet.Instance.playerPosition;
+                                var screenPos = Helper.WorldToValidScreenPosition(currentTask.WorldPosition);
+                                var movedSinceLastLog = _lastMoveDiagPos == Vector3.Zero
+                                    ? 0f
+                                    : Vector3.Distance(curPos, _lastMoveDiagPos);
+                                _lastMoveDiagPos = curPos;
+
+                                AreWeThereYet.Instance.LogMessage(
+                                    $"[ATY-PF] MoveExec | player world({curPos.X:F0},{curPos.Y:F0}) | " +
+                                    $"target world({currentTask.WorldPosition.X:F0},{currentTask.WorldPosition.Y:F0}) " +
+                                    $"taskDist={taskDistance:F0} | screenClick=({screenPos.X:F0},{screenPos.Y:F0}) | " +
+                                    $"movedSinceLastLog={movedSinceLastLog:F1}");
+                            }
+                        }
+
                         if (AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled &&
                         ShouldUseDash(currentTask.WorldPosition.WorldToGrid()))
                         {

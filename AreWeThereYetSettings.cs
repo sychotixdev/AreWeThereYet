@@ -85,6 +85,9 @@ public class AutoPilotSettings
 
         [Menu("Path Clearance (grid cells, character half-width, ~1)")]
         public RangeNode<int> PathClearance { get; set; } = new(1, 0, 6);
+
+        [Menu("A* Recompute Cooldown (ms, min time between background searches)")]
+        public RangeNode<int> AstarRecomputeIntervalMs { get; set; } = new(750, 100, 5000);
     }
 
     [Submenu(CollapsedByDefault = true)]

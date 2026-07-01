@@ -63,6 +63,10 @@ public class LeaderFollower
     // leader vs a partial (budget-limited) path that stops short.
     private Vector2i _lastAstarGoal;
 
+    // Throttle for background A* requests: prevents a fresh search firing (and the
+    // trail being re-anchored) nearly every tick when the target is far away.
+    private DateTime _lastAstarRequestTime = DateTime.MinValue;
+
     // Throttle for invalid-position diagnostics (avoid per-frame log spam)
     private DateTime _lastInvalidPosLog = DateTime.MinValue;
 
@@ -308,13 +312,40 @@ public class LeaderFollower
                 var res = _searchTask.Result;
                 if (res.Path is { Count: > 0 } gridPath)
                 {
-                    var smoothed = SmoothGridPath(gridPath);
-                    _trail.Clear();
-                    foreach (var g in smoothed)
-                        _trail.Add(Helper.ToWorld(g));
+                    // Only replace the trail wholesale when we don't already have a
+                    // usable route. An A* refresh is meant to top up a trail that's
+                    // about to run out (see the comment at the RequestAstar call
+                    // below), not to constantly re-anchor a perfectly good one. In
+                    // narrow corridors the greedy string-pull in SmoothGridPath picks
+                    // a different set of anchor points almost every search — a small
+                    // change in the start cell flips which waypoints survive — so
+                    // applying every refresh re-aimed the follower at a new point
+                    // nearly every tick. That's the "zigzag then stall" symptom seen
+                    // in narrow passages: the trail was being clobbered every ~150ms
+                    // even though the previous trail was still perfectly walkable.
+                    bool needsRefresh = _trail.Count <= 1 || _portalSuspected;
+                    if (needsRefresh)
+                    {
+                        var smoothed = SmoothGridPath(gridPath);
+                        var oldTarget = _trail.Count > 0 ? _trail[0] : (Vector3?)null;
+                        _trail.Clear();
+                        foreach (var g in smoothed)
+                            _trail.Add(Helper.ToWorld(g));
 
-                    _portalSuspected = false;
-                    if (LogEnabled) DebugLog(FormatSearch(res, gridPath.Count, smoothed.Count));
+                        _portalSuspected = false;
+                        if (LogEnabled)
+                        {
+                            DebugLog(FormatSearch(res, gridPath.Count, smoothed.Count));
+                            if (oldTarget is Vector3 ot && _trail.Count > 0)
+                                DebugLog($"Trail replaced: old target world({ot.X:F0},{ot.Y:F0}) -> " +
+                                          $"new target world({_trail[0].X:F0},{_trail[0].Y:F0})");
+                        }
+                    }
+                    else if (LogEnabled)
+                    {
+                        DebugLog(FormatSearch(res, gridPath.Count, 0) +
+                                 " (discarded - existing trail still usable)");
+                    }
                 }
                 else
                 {
@@ -363,6 +394,9 @@ public class LeaderFollower
                     break;
                 }
             }
+
+            if (LogEnabled)
+                DebugLog($"TrailScan bestIdx={bestIdx} trailCount={_trail.Count} clearance={clearance}");
 
             if (bestIdx >= 0)
             {
@@ -470,6 +504,16 @@ public class LeaderFollower
 
     private void RequestAstar(Vector3 startWorld, Vector3 goalWorld)
     {
+        // Cooldown: a search can complete in well under 1ms, and callers ask for a
+        // refresh on every tick the target is beyond AcquireDistance. Without this
+        // throttle we were re-searching (and, previously, re-anchoring the trail)
+        // nearly every tick — see the trail-replacement guard above for why that
+        // caused the follower to flip-flop between waypoints in narrow corridors.
+        var now = DateTime.Now;
+        if ((now - _lastAstarRequestTime).TotalMilliseconds < PfSettings.AstarRecomputeIntervalMs.Value)
+            return;
+        _lastAstarRequestTime = now;
+
         var terrain = LineOfSight.GetTerrainData();
         if (terrain == null) return;
 
