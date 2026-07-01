@@ -866,11 +866,20 @@ public class AutoPilot
                             if (!tasks.Exists(t => t.Type == TaskNodeType.Movement))
                                 tasks.Add(new TaskNode(followResult.WorldPosition, reachedBounds, TaskNodeType.Movement));
 
-                            // If we're close to the suspected portal location, look for the area transition entity
+                            // If we're close to the suspected portal location, look for the area
+                            // transition entity. followTarget != null here means the leader's
+                            // entity is still tracked in OUR entity list, which is Area-scoped -
+                            // so we're already in the same physical Area as them. That rules out
+                            // name-matching against leaderPartyElement.ZoneName (GetBestAreaTransitionEntity):
+                            // an intra-zone transition like "The Warden's Quarters" never renames
+                            // the zone, so its RenderName will never contain the zone name we'd be
+                            // matching against. Just take the closest transition to where the
+                            // trail went unreachable - the same heuristic used for the "leader
+                            // entity missing entirely" case below.
                             var distToPortal = Vector3.Distance(playerPos, followResult.WorldPosition);
                             if (distToPortal < AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value)
                             {
-                                var transitionEntity = GetBestAreaTransitionEntity(leaderPartyElement);
+                                var transitionEntity = GetClosestAreaTransitionEntity(followResult.WorldPosition);
                                 if (transitionEntity != null && transitionEntity.DistancePlayer < 80)
                                 {
                                     tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
