@@ -419,16 +419,21 @@ public class AutoPilot
     {
         try
         {
+            // GetClientRect() is WINDOW-relative; Mouse.SetCursorPos is an absolute Win32
+            // call, so the window's top-left must be added (same as GetTpButton /
+            // GetLabelClickPosition) or clicks land off-target in windowed mode.
+            var windowOffset = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle().TopLeft;
+
             var tpConfirm = GetTpConfirmation();
             if (tpConfirm != null)
-                return tpConfirm.GetClientRect().Center;
+                return tpConfirm.GetClientRect().Center + windowOffset;
 
             var ui = AreWeThereYet.Instance.GameController?.IngameState?.IngameUi?.PopUpWindow;
             if (ui == null || !ui.IsVisible)
                 return null;
 
             var okButton = FindButtonByText(ui, "OK");
-            return okButton?.GetClientRect().Center;
+            return okButton != null ? okButton.GetClientRect().Center + windowOffset : (Vector2?)null;
         }
         catch
         {
@@ -612,7 +617,10 @@ public class AutoPilot
             var tpConfirmation = GetTpConfirmation();
             if (tpConfirmation != null)
             {
-                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center);
+                // GetClientRect() is window-relative - add the window's top-left, same as
+                // GetTpButton, so the click lands correctly in windowed mode.
+                var confirmWindowOffset = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle().TopLeft;
+                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center + confirmWindowOffset);
                 yield return new WaitTime(200);
                 yield return Mouse.LeftClick();
                 yield return new WaitTime(1000);
@@ -791,7 +799,11 @@ public class AutoPilot
                             var tpConfirmation = GetTpConfirmation();
                             if (tpConfirmation != null)
                             {
-                                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center);
+                                // GetClientRect() is window-relative - add the window's
+                                // top-left, same as GetTpButton, so the click lands
+                                // correctly in windowed mode.
+                                var confirmWindowOffset = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle().TopLeft;
+                                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center + confirmWindowOffset);
                                 yield return new WaitTime(200);
                                 yield return Mouse.LeftClick();
                                 yield return new WaitTime(1000);
