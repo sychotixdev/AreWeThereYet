@@ -1,4 +1,5 @@
 using ExileCore.PoEMemory.Elements;
+using ExileCore.PoEMemory.MemoryObjects;
 using SharpDX;
 
 namespace AreWeThereYet;
@@ -28,6 +29,12 @@ public class TaskNode
     /// </summary>
     public int AttemptCount { get; set; }
     public LabelOnGround LabelOnGround { get; set; }
+    /// <summary>
+    /// The AreaTransition entity backing a Transition task. Used instead of a ground
+    /// label so we can rely on the entity's own position and Targetable component
+    /// rather than a (sometimes unreliable) UI label.
+    /// </summary>
+    public Entity TransitionEntity { get; set; }
 
     public TaskNode(Vector3 position, int bounds, TaskNodeType type = TaskNodeType.Movement)
     {
@@ -40,6 +47,14 @@ public class TaskNode
     {
         LabelOnGround = labelOnGround;
         WorldPosition = labelOnGround?.ItemOnGround?.Pos ?? Vector3.Zero;
+        Type = type;
+        Bounds = bounds;
+    }
+
+    public TaskNode(Entity transitionEntity, int bounds, TaskNodeType type = TaskNodeType.Transition)
+    {
+        TransitionEntity = transitionEntity;
+        WorldPosition = transitionEntity?.Pos ?? Vector3.Zero;
         Type = type;
         Bounds = bounds;
     }

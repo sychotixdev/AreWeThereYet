@@ -127,87 +127,81 @@ public class AutoPilot
         }
     }
 
-    private LabelOnGround GetBestPortalLabel(PartyElementWindow leaderPartyElement)
+    /// <summary>
+    /// Finds the AreaTransition entity to use, instead of relying on ground labels
+    /// (which can be missing, stale, or mismatched with the actual transition entity).
+    /// The entity's own RenderName is checked against the leader's zone name, and its
+    /// Targetable component (isTargeted) is what tells us we're actually aiming at it
+    /// once we're close enough to click.
+    /// </summary>
+    private Entity GetBestAreaTransitionEntity(PartyElementWindow leaderPartyElement)
     {
         try
         {
-            var currentZoneName = AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName;
             var isHideout = (bool)AreWeThereYet.Instance?.GameController?.Area?.CurrentArea?.IsHideout;
             var realLevel = AreWeThereYet.Instance.GameController?.Area?.CurrentArea?.RealLevel ?? 0;
+
+            var allTransitions = AreWeThereYet.Instance.GameController?.EntityListWrapper?.ValidEntitiesByType[EntityType.AreaTransition]
+                ?.Where(x => x != null && x.IsValid)
+                .ToList() ?? new List<Entity>();
 
             // Enhanced logic: differentiate between leveling zones and endgame content
             if (isHideout || realLevel >= 68)
             {
-                // ENDGAME/HIDEOUT: Any portal is fine (maps, hideout transitions)
-                var portalLabels = AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ItemsOnGroundLabels
-                    .Where(x => x != null && x.IsVisible && x.Label != null && x.Label.IsValid &&
-                            x.Label.IsVisible && x.ItemOnGround != null &&
-                            (x.ItemOnGround.Metadata.ToLower().Contains("areatransition") ||
-                                x.ItemOnGround.Metadata.ToLower().Contains("portal")))
-                    .OrderBy(x => Vector3.Distance(lastTargetPosition, x.ItemOnGround.Pos))
+                // ENDGAME/HIDEOUT: Any transition is fine (maps, hideout transitions)
+                var transitions = allTransitions
+                    .OrderBy(x => Vector3.Distance(lastTargetPosition, x.Pos))
                     .ToList();
 
                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                 {
-                    AreWeThereYet.Instance.LogMessage($"Endgame/Hideout portal search: Found {portalLabels?.Count ?? 0} portals");
+                    AreWeThereYet.Instance.LogMessage($"Endgame/Hideout area transition search: Found {transitions.Count} transitions");
                 }
 
-                return isHideout && portalLabels?.Count > 0
-                    ? portalLabels[random.Next(portalLabels.Count)] // Random portal in hideout
-                    : portalLabels?.FirstOrDefault(); // Closest portal in endgame
+                return isHideout && transitions.Count > 0
+                    ? transitions[random.Next(transitions.Count)] // Random transition in hideout
+                    : transitions.FirstOrDefault(); // Closest transition in endgame
             }
             else
             {
-                // LEVELING ZONES: Must find portal that leads to leader's specific zone
-                var portalLabels = AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ItemsOnGroundLabels
-                    .Where(x => x != null && x.IsVisible && x.Label != null && x.Label.IsValid &&
-                            x.Label.IsVisible && x.ItemOnGround != null &&
-                            (x.ItemOnGround.Metadata.ToLower().Contains("areatransition") ||
-                                x.ItemOnGround.Metadata.ToLower().Contains("portal")) &&
-                            x.Label.Text.ToLower().Contains(leaderPartyElement.ZoneName.ToLower())) // IMPORTANT KEY IMPROVEMENT: Check portal text
-                    .OrderBy(x => Vector3.Distance(lastTargetPosition, x.ItemOnGround.Pos))
+                // LEVELING ZONES: Must find the transition that leads to leader's specific zone
+                var leaderZone = leaderPartyElement.ZoneName ?? "";
+                var transitions = allTransitions
+                    .Where(x => !string.IsNullOrEmpty(x.RenderName) &&
+                            x.RenderName.ToLower().Contains(leaderZone.ToLower())) // IMPORTANT KEY IMPROVEMENT: Check entity RenderName
+                    .OrderBy(x => Vector3.Distance(lastTargetPosition, x.Pos))
                     .ToList();
 
                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                 {
-                    var allPortals = AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ItemsOnGroundLabels
-                        .Where(x => x != null && x.IsVisible && x.Label != null && x.Label.IsValid &&
-                                x.Label.IsVisible && x.ItemOnGround != null &&
-                                (x.ItemOnGround.Metadata.ToLower().Contains("transition") ||
-                                    x.ItemOnGround.Metadata.ToLower().Contains("portal")))
-                        .ToList();
+                    AreWeThereYet.Instance.LogMessage($"Leveling zone transition search:");
+                    AreWeThereYet.Instance.LogMessage($"  - Leader zone: '{leaderZone}'");
+                    AreWeThereYet.Instance.LogMessage($"  - All transitions: {allTransitions.Count}");
+                    AreWeThereYet.Instance.LogMessage($"  - Matching transitions: {transitions.Count}");
 
-                    AreWeThereYet.Instance.LogMessage($"Leveling zone portal search:");
-                    AreWeThereYet.Instance.LogMessage($"  - Leader zone: '{leaderPartyElement.ZoneName}'");
-                    AreWeThereYet.Instance.LogMessage($"  - All portals: {allPortals?.Count ?? 0}");
-                    AreWeThereYet.Instance.LogMessage($"  - Matching portals: {portalLabels?.Count ?? 0}");
-
-                    if (allPortals != null)
+                    foreach (var t in allTransitions)
                     {
-                        foreach (var portal in allPortals)
-                        {
-                            var matches = portal.Label.Text.Contains(leaderPartyElement.ZoneName);
-                            AreWeThereYet.Instance.LogMessage($"    Portal: '{portal.Label.Text}' -> {(matches ? "MATCH" : "No match")}");
-                        }
+                        var matches = t.RenderName?.ToLower().Contains(leaderZone.ToLower()) == true;
+                        AreWeThereYet.Instance.LogMessage($"    Transition: '{t.RenderName}' -> {(matches ? "MATCH" : "No match")}");
                     }
                 }
 
-                // EXPLICIT NULL CHECK: If no matching portals found in leveling zone, return null for teleport fallback
-                if (portalLabels == null || portalLabels.Count == 0)
+                // EXPLICIT NULL CHECK: If no matching transition found in leveling zone, return null for teleport fallback
+                if (transitions.Count == 0)
                 {
                     if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                     {
-                        AreWeThereYet.Instance.LogMessage($"No matching portal found for leader zone '{leaderPartyElement.ZoneName}' - will use teleport button fallback");
+                        AreWeThereYet.Instance.LogMessage($"No matching area transition found for leader zone '{leaderZone}' - will use teleport button fallback");
                     }
                     return null; // Force teleport button usage
                 }
 
-                return portalLabels.FirstOrDefault(); // Return closest matching portal
+                return transitions.FirstOrDefault(); // Return closest matching transition
             }
         }
         catch (Exception ex)
         {
-            AreWeThereYet.Instance.LogError($"GetBestPortalLabel failed: {ex.Message}");
+            AreWeThereYet.Instance.LogError($"GetBestAreaTransitionEntity failed: {ex.Message}");
             return null; // Exception fallback
         }
     }
@@ -491,8 +485,8 @@ public class AutoPilot
                         AreWeThereYet.Instance.LogMessage($"Leader zone info reliable: '{leaderPartyElement.ZoneName}' - proceeding with portal/teleport logic");
                     }
 
-                    var portal = GetBestPortalLabel(leaderPartyElement);
-                    if (portal != null)
+                    var transitionEntity = GetBestAreaTransitionEntity(leaderPartyElement);
+                    if (transitionEntity != null)
                     {
                         // Only queue one transition at a time. Without this guard we re-add a
                         // Transition task every loop iteration (this branch runs whenever the
@@ -503,12 +497,12 @@ public class AutoPilot
                         {
                             if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                             {
-                                AreWeThereYet.Instance.LogMessage($"Found reliable portal: {portal.ItemOnGround.Metadata}");
+                                AreWeThereYet.Instance.LogMessage($"Found reliable area transition: {transitionEntity.RenderName}");
                             }
                             // Drop any trail-walk movement tasks: the Transition task now
-                            // self-navigates to the portal, so it should be the only task.
+                            // self-navigates to the transition, so it should be the only task.
                             tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
-                            tasks.Add(new TaskNode(portal, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
+                            tasks.Add(new TaskNode(transitionEntity, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
                         }
                     }
                     else
@@ -621,15 +615,15 @@ public class AutoPilot
                             if (!tasks.Exists(t => t.Type == TaskNodeType.Movement))
                                 tasks.Add(new TaskNode(followResult.WorldPosition, reachedBounds, TaskNodeType.Movement));
 
-                            // If we're close to the suspected portal location, look for a portal label
+                            // If we're close to the suspected portal location, look for the area transition entity
                             var distToPortal = Vector3.Distance(playerPos, followResult.WorldPosition);
                             if (distToPortal < AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value)
                             {
-                                var transition = GetBestPortalLabel(leaderPartyElement);
-                                if (transition != null && transition.ItemOnGround.DistancePlayer < 80)
+                                var transitionEntity = GetBestAreaTransitionEntity(leaderPartyElement);
+                                if (transitionEntity != null && transitionEntity.DistancePlayer < 80)
                                 {
                                     tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
-                                    tasks.Add(new TaskNode(transition, 200, TaskNodeType.Transition));
+                                    tasks.Add(new TaskNode(transitionEntity, 200, TaskNodeType.Transition));
                                 }
                             }
                             break;
@@ -784,14 +778,14 @@ public class AutoPilot
 
                     case TaskNodeType.Transition:
                         {
-                            // Re-validate portal exists and is still valid before attempting to use it
-                            if (currentTask.LabelOnGround?.Label?.IsValid != true ||
-                                currentTask.LabelOnGround?.IsVisible != true ||
-                                currentTask.LabelOnGround?.ItemOnGround == null)
+                            var transitionEntity = currentTask.TransitionEntity;
+
+                            // Re-validate the transition entity still exists before attempting to use it
+                            if (transitionEntity == null || !transitionEntity.IsValid)
                             {
                                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                                 {
-                                    AreWeThereYet.Instance.LogMessage("Portal became invalid - removing transition task, will re-evaluate in main loop");
+                                    AreWeThereYet.Instance.LogMessage("Area transition entity became invalid - removing transition task, will re-evaluate in main loop");
                                 }
 
                                 tasks.RemoveAt(0);
@@ -801,16 +795,16 @@ public class AutoPilot
 
                             // ---------------------------------------------------------------
                             // STEP 1: PATH TO THE TRANSITION.
-                            // The click-to-move that a label click triggers uses the GAME'S
-                            // navigation, which snags on walls (the "rubbing against a wall
-                            // that wasn't at the transition" symptom). So if we aren't already
-                            // within clicking range, walk toward the transition ourselves using
-                            // the SAME breadcrumb + A* pathing that follows the leader - this
-                            // finishes the leader's trail to the portal, routing around walls.
+                            // Click-to-move relying on a UI label uses the GAME'S navigation,
+                            // which snags on walls (the "rubbing against a wall that wasn't at
+                            // the transition" symptom). So if we aren't already within clicking
+                            // range of the entity, walk toward it ourselves using the SAME
+                            // breadcrumb + A* pathing that follows the leader - this finishes
+                            // the leader's trail to the transition, routing around walls.
                             // Do NOT flag a transition yet - we haven't clicked anything.
                             // ---------------------------------------------------------------
                             var portalPos = currentTask.WorldPosition;
-                            var distToPortal = currentTask.LabelOnGround.ItemOnGround.DistancePlayer;
+                            var distToPortal = transitionEntity.DistancePlayer;
                             var clickDistance = AreWeThereYet.Instance.Settings.AutoPilot.TransitionClickDistance.Value;
                             var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
 
@@ -863,10 +857,29 @@ public class AutoPilot
                             DoTransitionClick:;
 
                             // ---------------------------------------------------------------
-                            // STEP 2: CLICK THE LABEL.
-                            // We're in range. Flag the transition (so AreaChange() spawns the
-                            // grace period) and click.
+                            // STEP 2: TARGET AND CLICK THE ENTITY.
+                            // We're in range. Move the cursor onto the transition's own world
+                            // position (same conversion used for movement/leader targets) and
+                            // check its Targetable component - isTargeted tells us the game is
+                            // actually aiming at this entity rather than the ground next to it.
+                            // Only flag the transition (so AreaChange() spawns the grace period)
+                            // and click once we're confirmed targeted.
                             // ---------------------------------------------------------------
+                            Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
+                            yield return new WaitTime(60);
+
+                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.Pos);
+                            var targetable = transitionEntity.GetComponent<Targetable>();
+
+                            if (targetable == null || !targetable.isTargeted)
+                            {
+                                // Not targeted yet - mouseover and try again next tick.
+                                yield return Mouse.SetCursorPosHuman(transitionScreenPos);
+                                yield return new WaitTime(30 + random.Next(AreWeThereYet.Instance.Settings.AutoPilot.InputFrequency));
+                                yield return null;
+                                continue;
+                            }
+
                             currentTask.AttemptCount++;
                             _isTransitioning = true;
                             _transitioningStartTime = DateTime.Now;
@@ -876,11 +889,7 @@ public class AutoPilot
                                 AreWeThereYet.Instance.LogMessage($"Clicking transition (attempt {currentTask.AttemptCount}/{AreWeThereYet.Instance.Settings.AutoPilot.MaxTransitionAttempts.Value})");
                             }
 
-                            Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
-                            yield return new WaitTime(60);
-                            // Absolute-screen position (window offset applied) - a bare
-                            // GetClientRect().Center is window-relative and lands off-window.
-                            yield return Mouse.SetCursorPosAndLeftClickHuman(GetLabelClickPosition(currentTask.LabelOnGround), 100);
+                            yield return Mouse.SetCursorPosAndLeftClickHuman(transitionScreenPos, 100);
 
                             // ---------------------------------------------------------------
                             // STEP 3: WAIT FOR THE TRANSITION.
@@ -1151,16 +1160,17 @@ public class AutoPilot
 
         try
         {
-            var portalLabels =
-                AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ItemsOnGroundLabels.Where(x =>
-                    x != null && x.IsVisible && x.Label != null && x.Label.IsValid && x.Label.IsVisible &&
-                    x.ItemOnGround != null &&
-                    (x.ItemOnGround.Metadata.ToLower().Contains("areatransition") ||
-                     x.ItemOnGround.Metadata.ToLower().Contains("portal"))).ToList();
+            var transitions =
+                AreWeThereYet.Instance.GameController?.EntityListWrapper?.ValidEntitiesByType[EntityType.AreaTransition]
+                    ?.Where(x => x != null && x.IsValid).ToList();
 
-            foreach (var portal in portalLabels)
+            if (transitions != null)
             {
-                AreWeThereYet.Instance.Graphics.DrawLine(portal.Label.GetClientRectCache.TopLeft, portal.Label.GetClientRectCache.TopRight, 2f, Color.Firebrick);
+                foreach (var transition in transitions)
+                {
+                    var screenPos = Helper.WorldToValidScreenPosition(transition.Pos);
+                    AreWeThereYet.Instance.Graphics.DrawText(transition.RenderName ?? "AreaTransition", screenPos, Color.Firebrick);
+                }
             }
         }
         catch (Exception)
