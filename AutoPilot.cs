@@ -254,6 +254,28 @@ public class AutoPilot
         }
     }
     
+    /// <summary>
+    /// Absolute-screen click position for a ground label. Element.GetClientRect() is in
+    /// WINDOW-relative coordinates; Mouse.SetCursorPos is an absolute Win32 call, so we
+    /// must add the window's top-left (the same offset GetTpButton and
+    /// Helper.WorldToValidScreenPosition apply). Without this the cursor lands off by the
+    /// window origin - outside the game window in windowed mode - and the click misses.
+    /// The result is clamped to the window so we never click outside it.
+    /// </summary>
+    private Vector2 GetLabelClickPosition(LabelOnGround label)
+    {
+        var windowRect = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle();
+        var center = label.Label.GetClientRect().Center;
+        var pos = new Vector2(center.X + windowRect.TopLeft.X, center.Y + windowRect.TopLeft.Y);
+
+        // Clamp inside the window (small margin) so an odd label rect can never send the
+        // cursor off-window.
+        const float margin = 5f;
+        pos.X = Math.Clamp(pos.X, windowRect.Left + margin, windowRect.Right - margin);
+        pos.Y = Math.Clamp(pos.Y, windowRect.Top + margin, windowRect.Bottom - margin);
+        return pos;
+    }
+
     private Vector2 GetTpButton(PartyElementWindow leaderPartyElement)
     {
         try
@@ -291,12 +313,14 @@ public class AutoPilot
     {
         var uiLoot = AreWeThereYet.Instance.GameController.IngameState.IngameUi.ItemsOnGroundLabels.FirstOrDefault(I => I.IsVisible && I.ItemOnGround.Id == item.Id);
         if (uiLoot == null) yield return null;
-        var clickPos = uiLoot?.Label?.GetClientRect().Center;
-        if (clickPos != null)
+        if (uiLoot?.Label != null)
         {
+            // Window offset applied (see GetLabelClickPosition) so the hover lands on the
+            // label rather than off-window in windowed mode.
+            var clickPos = GetLabelClickPosition(uiLoot);
             Mouse.SetCursorPos(new Vector2(
-                clickPos.Value.X + random.Next(-15, 15),
-                clickPos.Value.Y + random.Next(-10, 10)));
+                clickPos.X + random.Next(-15, 15),
+                clickPos.Y + random.Next(-10, 10)));
         }
 	        
         yield return new WaitTime(30 + random.Next(AreWeThereYet.Instance.Settings.AutoPilot.InputFrequency));
@@ -474,32 +498,68 @@ public class AutoPilot
                             {
                                 AreWeThereYet.Instance.LogMessage($"Found reliable portal: {portal.ItemOnGround.Metadata}");
                             }
+                            // Drop any trail-walk movement tasks: the Transition task now
+                            // self-navigates to the portal, so it should be the only task.
+                            tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
                             tasks.Add(new TaskNode(portal, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
                         }
                     }
                     else
                     {
-                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        // No transition label is visible yet. Before falling back to the
+                        // party teleport, finish walking the leader's breadcrumb trail toward
+                        // where they vanished (the portal) - just like following the leader.
+                        // The label becomes visible as we close in, and the Transition task
+                        // above takes over. Only teleport once the trail is exhausted (we've
+                        // arrived but still see no label) or pathfinding is disabled.
+                        var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
+                        var reachedBounds = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.ReachedBounds.Value;
+
+                        var walkedTrail = false;
+                        if (pfEnabled && AreWeThereYet.Instance.leaderFollower.HasTrail &&
+                            AreWeThereYet.Instance.leaderFollower.TrailEnd is Vector3 trailEnd)
                         {
-                            AreWeThereYet.Instance.LogMessage("No suitable portal found - using teleport button fallback");
+                            var nav = AreWeThereYet.Instance.leaderFollower.NavigateTo(
+                                AreWeThereYet.Instance.playerPosition, trailEnd,
+                                allowTrailFollow: true,
+                                arriveWithin: AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value);
+
+                            if (nav.Type != FollowResultType.Idle)
+                            {
+                                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                                {
+                                    AreWeThereYet.Instance.LogMessage("No portal label yet - walking breadcrumb trail toward the transition");
+                                }
+                                tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                                tasks.Add(new TaskNode(nav.WorldPosition, reachedBounds, TaskNodeType.Movement));
+                                walkedTrail = true;
+                            }
                         }
 
-                        var tpConfirmation = GetTpConfirmation();
-                        if (tpConfirmation != null)
+                        if (!walkedTrail)
                         {
-                            yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center);
-                            yield return new WaitTime(200);
-                            yield return Mouse.LeftClick();
-                            yield return new WaitTime(1000);
-                        }
+                            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            {
+                                AreWeThereYet.Instance.LogMessage("No suitable portal found and no trail to follow - using teleport button fallback");
+                            }
 
-                        var tpButton = GetTpButton(leaderPartyElement);
-                        if (!tpButton.Equals(Vector2.Zero))
-                        {
-                            yield return Mouse.SetCursorPosHuman(tpButton, false);
-                            yield return new WaitTime(200);
-                            yield return Mouse.LeftClick();
-                            yield return new WaitTime(200);
+                            var tpConfirmation = GetTpConfirmation();
+                            if (tpConfirmation != null)
+                            {
+                                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center);
+                                yield return new WaitTime(200);
+                                yield return Mouse.LeftClick();
+                                yield return new WaitTime(1000);
+                            }
+
+                            var tpButton = GetTpButton(leaderPartyElement);
+                            if (!tpButton.Equals(Vector2.Zero))
+                            {
+                                yield return Mouse.SetCursorPosHuman(tpButton, false);
+                                yield return new WaitTime(200);
+                                yield return Mouse.LeftClick();
+                                yield return new WaitTime(200);
+                            }
                         }
                     }
                 }
@@ -716,31 +776,52 @@ public class AutoPilot
                             // The click-to-move that a label click triggers uses the GAME'S
                             // navigation, which snags on walls (the "rubbing against a wall
                             // that wasn't at the transition" symptom). So if we aren't already
-                            // within clicking range, walk toward the transition ourselves and
-                            // do NOT flag a transition yet - we haven't clicked anything.
+                            // within clicking range, walk toward the transition ourselves using
+                            // the SAME breadcrumb + A* pathing that follows the leader - this
+                            // finishes the leader's trail to the portal, routing around walls.
+                            // Do NOT flag a transition yet - we haven't clicked anything.
                             // ---------------------------------------------------------------
                             var portalPos = currentTask.WorldPosition;
                             var distToPortal = currentTask.LabelOnGround.ItemOnGround.DistancePlayer;
                             var clickDistance = AreWeThereYet.Instance.Settings.AutoPilot.TransitionClickDistance.Value;
+                            var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
 
                             if (distToPortal > clickDistance)
                             {
+                                // Ask the shared navigator for the next waypoint toward the
+                                // portal (trail-follow enabled: the trail leads to it). Falls
+                                // back to walking straight at the portal if pathfinding is off.
+                                var moveTarget = portalPos;
+                                if (pfEnabled)
+                                {
+                                    var nav = AreWeThereYet.Instance.leaderFollower.NavigateTo(
+                                        AreWeThereYet.Instance.playerPosition, portalPos,
+                                        allowTrailFollow: true, arriveWithin: clickDistance);
+
+                                    // Idle == the navigator considers us arrived (in range + LOS);
+                                    // fall through to the click. Otherwise walk to its waypoint.
+                                    if (nav.Type != FollowResultType.Idle)
+                                        moveTarget = nav.WorldPosition;
+                                    else
+                                        goto DoTransitionClick;
+                                }
+
                                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                                 {
                                     AreWeThereYet.Instance.LogMessage($"Transition {distToPortal:F0} away (> {clickDistance}) - walking to it before clicking");
                                 }
 
                                 if (AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled &&
-                                    ShouldUseDash(portalPos.WorldToGrid()))
+                                    ShouldUseDash(moveTarget.WorldToGrid()))
                                 {
-                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(portalPos));
+                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(moveTarget));
                                     yield return new WaitTime(random.Next(25) + 30);
                                     Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.DashKey);
                                     yield return new WaitTime(random.Next(25) + 30);
                                 }
                                 else
                                 {
-                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(portalPos));
+                                    yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(moveTarget));
                                     yield return new WaitTime(random.Next(25) + 30);
                                     Keyboard.KeyDown(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                                     yield return new WaitTime(random.Next(25) + 30);
@@ -750,6 +831,8 @@ public class AutoPilot
                                 yield return null;
                                 continue;
                             }
+
+                            DoTransitionClick:;
 
                             // ---------------------------------------------------------------
                             // STEP 2: CLICK THE LABEL.
@@ -767,7 +850,9 @@ public class AutoPilot
 
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                             yield return new WaitTime(60);
-                            yield return Mouse.SetCursorPosAndLeftClickHuman(new Vector2(currentTask.LabelOnGround.Label.GetClientRect().Center.X, currentTask.LabelOnGround.Label.GetClientRect().Center.Y), 100);
+                            // Absolute-screen position (window offset applied) - a bare
+                            // GetClientRect().Center is window-relative and lands off-window.
+                            yield return Mouse.SetCursorPosAndLeftClickHuman(GetLabelClickPosition(currentTask.LabelOnGround), 100);
 
                             // ---------------------------------------------------------------
                             // STEP 3: WAIT FOR THE TRANSITION.

@@ -92,6 +92,16 @@ public class LeaderFollower
 
     // -----------------------------------------------------------------------
 
+    /// <summary>True when we still have breadcrumb points to consume.</summary>
+    public bool HasTrail => _trail.Count > 0;
+
+    /// <summary>
+    /// The newest breadcrumb (where the leader was last recorded). After the leader zones
+    /// this is effectively the portal location, so it's a valid approach target even before
+    /// the transition label becomes visible.
+    /// </summary>
+    public Vector3? TrailEnd => _trail.Count > 0 ? _trail[^1] : (Vector3?)null;
+
     /// <summary>
     /// Call on area change: clears trail, cancels any in-flight search.
     /// </summary>
@@ -226,23 +236,71 @@ public class LeaderFollower
 
         // 1. Record breadcrumb trail. No portal heuristic here any more — whether the
         //    leader is behind a portal is decided purely by whether a path to them
-        //    exists (steps 5–8), not by how far they jumped.
+        //    exists, not by how far they jumped.
         RecordTrail(leaderPos);
 
-        float distToLeader = Vector3.Distance(playerPos, leaderPos);
+        // 2. Delegate to the shared navigation core with the leader as the target.
+        return NavigateInternal(playerPos, leaderPos, allowTrailFollow: true, arriveWithin: KeepWithinDistance);
+    }
 
-        // 2. In position with line-of-sight → nothing to do; leader is reachable.
-        if (distToLeader <= KeepWithinDistance &&
-            LineOfSight.HasLineOfSightRaw(playerPos, leaderPos))
+    // -----------------------------------------------------------------------
+    // Generic navigation entry point — path to ANY static world target using the
+    // exact same trail + LOS string-pull + A* machinery that follows the leader.
+    // Used to walk to an area transition (finishing the leader's breadcrumb trail
+    // to the portal) and can be used for loot or any other point target.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Navigate toward an arbitrary static world <paramref name="targetPos"/> (an area
+    /// transition, a loot item, …) reusing the leader-follow pathing. This does NOT record
+    /// a trail — the caller owns trail recording via <see cref="Tick"/>.
+    ///
+    /// When <paramref name="allowTrailFollow"/> is true the existing breadcrumb trail is
+    /// consumed toward the target. That is exactly what we want for an area transition:
+    /// the trail is the leader's recorded route and it ends at the portal they took, so
+    /// finishing the trail walks us to the transition (around walls) just like following
+    /// the leader. For an OFF-trail target such as loot, pass false so we path straight to
+    /// it via A*/LOS instead of chasing the leader's now-stale trail.
+    ///
+    /// Returns <see cref="FollowResultType.Idle"/> once we are within
+    /// <paramref name="arriveWithin"/> world units AND have line of sight to the target.
+    /// </summary>
+    public FollowResult NavigateTo(Vector3 playerPos, Vector3 targetPos,
+        bool allowTrailFollow, int arriveWithin)
+    {
+        if (!IsValidPosition(playerPos) || !IsValidPosition(targetPos))
+            return FollowResult.Idle;
+
+        LineOfSight.EnsureTerrainData();
+
+        var result = NavigateInternal(playerPos, targetPos, allowTrailFollow, arriveWithin);
+        if (LogEnabled) LogTickSummary(playerPos, targetPos, result);
+        return result;
+    }
+
+    /// <summary>
+    /// The shared navigation core: given our position and a target, return the next follow
+    /// action (Idle when arrived, MoveTo the next waypoint, or PortalSuspected when no
+    /// walkable route exists). Trail recording is the caller's responsibility so this can
+    /// serve both the moving leader and static targets.
+    /// </summary>
+    private FollowResult NavigateInternal(Vector3 playerPos, Vector3 targetPos,
+        bool allowTrailFollow, int arriveWithin)
+    {
+        float distToTarget = Vector3.Distance(playerPos, targetPos);
+
+        // 2. Arrived: within range AND line of sight to the target → nothing to do.
+        if (distToTarget <= arriveWithin &&
+            LineOfSight.HasLineOfSightRaw(playerPos, targetPos))
         {
-            _lastReachablePos = leaderPos;
+            _lastReachablePos = targetPos;
             _portalSuspected = false;
             return FollowResult.Idle;
         }
 
-        // 3. Consume a completed JPS search. A path means the leader is reachable (seed
+        // 3. Consume a completed JPS search. A path means the target is reachable (seed
         //    the trail with it); a null path means NO walkable route exists right now
-        //    — the leader most likely took a portal/transition.
+        //    — the target is most likely behind a portal/transition.
         if (_searchTask is { IsCompleted: true })
         {
             if (_searchTask.IsCompletedSuccessfully)
@@ -260,7 +318,7 @@ public class LeaderFollower
                 }
                 else
                 {
-                    // No walkable route → assume the leader is behind a portal/transition.
+                    // No walkable route → assume the target is behind a portal/transition.
                     _portalSuspected = true;
                     if (LogEnabled) DebugLog(FormatSearch(res, 0, 0));
                 }
@@ -276,51 +334,55 @@ public class LeaderFollower
         // 5. Is any part of the route reachable by a straight WALKABLE line? Walkability
         //    (not line-of-sight) is required: LOS permits see-through/dashable gaps that
         //    aren't actually walkable. The furthest reachable breadcrumb is both our next
-        //    waypoint AND our "last known valid (reachable) location" toward the leader.
-        int bestIdx = -1;
-        for (int i = _trail.Count - 1; i >= 0; i--)
+        //    waypoint AND our "last known valid (reachable) location" toward the target.
+        //    Skipped entirely for off-trail targets (loot): the trail is the leader's
+        //    route, not a route to an arbitrary point.
+        if (allowTrailFollow)
         {
-            if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i]))
+            int bestIdx = -1;
+            for (int i = _trail.Count - 1; i >= 0; i--)
             {
-                bestIdx = i;
-                break;
+                if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i]))
+                {
+                    bestIdx = i;
+                    break;
+                }
+            }
+
+            if (bestIdx >= 0)
+            {
+                // A valid path exists → follow it. The target is reachable, so clear any
+                // portal suspicion and remember this reachable spot.
+                _lastReachablePos = _trail[bestIdx];
+                _portalSuspected = false;
+                if (bestIdx > 0)
+                    _trail.RemoveRange(0, bestIdx); // discard skipped breadcrumbs
+
+                // If the target has outrun the breadcrumb trail, refresh it with a real A*
+                // path in the background before we run out of reachable points.
+                if (distToTarget > PfSettings.AcquireDistance.Value &&
+                    (_searchTask == null || _searchTask.IsCompleted))
+                    RequestAstar(playerPos, targetPos);
+
+                return FollowResult.MoveTo(_trail[0]);
             }
         }
 
-        if (bestIdx >= 0)
-        {
-            // A valid path exists → follow it. The leader is reachable, so clear any
-            // portal suspicion and remember this reachable spot.
-            _lastReachablePos = _trail[bestIdx];
-            _portalSuspected = false;
-            if (bestIdx > 0)
-                _trail.RemoveRange(0, bestIdx); // discard skipped breadcrumbs
-
-            // If the leader has outrun the breadcrumb trail, refresh it with a real A*
-            // path in the background before we run out of reachable points.
-            if (distToLeader > PfSettings.AcquireDistance.Value &&
-                (_searchTask == null || _searchTask.IsCompleted))
-                RequestAstar(playerPos, leaderPos);
-
-            return FollowResult.MoveTo(_trail[0]);
-        }
-
-        // 6. Nothing on the trail is reachable. Ask A* whether ANY route to the leader
-        //    exists — it may find one the breadcrumb trail doesn't capture.
+        // 6. Nothing on the trail is reachable (or trail-follow is disabled). Ask A*
+        //    whether ANY route to the target exists — it may find one the trail doesn't.
         if (_searchTask == null || _searchTask.IsCompleted)
-            RequestAstar(playerPos, leaderPos);
+            RequestAstar(playerPos, targetPos);
 
-        // 7. No reachable route. If we have a last known reachable location, head there:
-        //    that's where the leader was before we lost the path (i.e. by the portal).
-        //    PortalSuspected lets AutoPilot look for the portal label once we arrive;
-        //    if A* hasn't answered yet we still walk there as a plain move.
+        // 7. No reachable route yet. If we have a last known reachable location, head
+        //    there: that's where the target was before we lost the path (i.e. by the
+        //    portal). PortalSuspected lets AutoPilot look for the portal label once we
+        //    arrive; if A* hasn't answered yet we still walk there as a plain move.
         if (_lastReachablePos is Vector3 lastReachable)
             return _portalSuspected
                 ? FollowResult.PortalSuspected(lastReachable)
                 : FollowResult.MoveTo(lastReachable);
 
-        // 8. No path and no last known location → wait. The existing AutoPilot zone-change
-        //    logic clicks the leader's portal once they fully change areas.
+        // 8. No path and no last known location → wait.
         return FollowResult.Idle;
     }
 
