@@ -67,6 +67,13 @@ public class LeaderFollower
     // trail being re-anchored) nearly every tick when the target is far away.
     private DateTime _lastAstarRequestTime = DateTime.MinValue;
 
+    // Set at the end of the current tick's trail scan (step 5): true when NOTHING on
+    // the trail was reachable, even after the clearance=0 fallback. Read at the START
+    // of the NEXT tick's step 3 to force an A* refresh — otherwise the "only refresh
+    // when the trail is nearly exhausted" guard (added to stop constant re-anchoring)
+    // would leave us stuck re-scanning the same dead trail forever.
+    private bool _trailUnreachableThisTick;
+
     // Throttle for invalid-position diagnostics (avoid per-frame log spam)
     private DateTime _lastInvalidPosLog = DateTime.MinValue;
 
@@ -115,6 +122,7 @@ public class LeaderFollower
         _portalSuspected = false;
         _lastReachablePos = null;
         _lastPlayerPos = null;
+        _trailUnreachableThisTick = false;
         CancelSearch();
     }
 
@@ -323,7 +331,7 @@ public class LeaderFollower
                     // nearly every tick. That's the "zigzag then stall" symptom seen
                     // in narrow passages: the trail was being clobbered every ~150ms
                     // even though the previous trail was still perfectly walkable.
-                    bool needsRefresh = _trail.Count <= 1 || _portalSuspected;
+                    bool needsRefresh = _trail.Count <= 1 || _portalSuspected || _trailUnreachableThisTick;
                     if (needsRefresh)
                     {
                         var smoothed = SmoothGridPath(gridPath);
@@ -382,7 +390,14 @@ public class LeaderFollower
         //    waypoint AND our "last known valid (reachable) location" toward the target.
         //    Skipped entirely for off-trail targets (loot): the trail is the leader's
         //    route, not a route to an arbitrary point.
-        if (allowTrailFollow)
+        if (!allowTrailFollow)
+        {
+            // Off-trail (static-target) navigation doesn't use the leader trail, so it
+            // shouldn't inherit a stale "unreachable" flag from a previous leader-follow
+            // tick and force a spurious refresh in NavigateInternal's step 3.
+            _trailUnreachableThisTick = false;
+        }
+        else
         {
             int clearance = PfSettings.PathClearance.Value;
             int bestIdx = -1;
@@ -395,8 +410,36 @@ public class LeaderFollower
                 }
             }
 
+            // Fallback found the deadlock: JPS only guarantees per-cell walkability
+            // (isPathable checks value 1/5, no clearance band), and SmoothGridPath's
+            // single-step fallback ("adjacent cells are walkable") never verifies
+            // clearance either — only its multi-cell shortcuts do. So in a corridor
+            // narrower than 2*clearance+1 cells, EVERY point on an otherwise-valid
+            // trail can fail this clearance-aware check, giving bestIdx=-1 forever.
+            // That's a hard stall: no MoveTo is ever returned again (confirmed by
+            // the "did not move at all" test run - bestIdx=-1 on every single tick).
+            // Retry with clearance=0 (raw walkability, exactly what JPS guarantees)
+            // before giving up — a wall-hugging move through a tight gap beats a
+            // permanent freeze.
+            int usedClearance = clearance;
+            if (bestIdx < 0 && clearance > 0)
+            {
+                for (int i = _trail.Count - 1; i >= 0; i--)
+                {
+                    if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], 0))
+                    {
+                        bestIdx = i;
+                        usedClearance = 0;
+                        break;
+                    }
+                }
+            }
+
+            _trailUnreachableThisTick = bestIdx < 0;
+
             if (LogEnabled)
-                DebugLog($"TrailScan bestIdx={bestIdx} trailCount={_trail.Count} clearance={clearance}");
+                DebugLog($"TrailScan bestIdx={bestIdx} trailCount={_trail.Count} " +
+                         $"clearance={clearance} usedClearance={usedClearance}");
 
             if (bestIdx >= 0)
             {
