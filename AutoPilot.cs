@@ -531,7 +531,13 @@ public class AutoPilot
             var currentAreaName = AreWeThereYet.Instance.GameController.Area.CurrentArea.DisplayName;
 
             // Success Condition: The leader's entity is found and they are in the same zone as us.
-            if (leaderPartyElement != null && followTarget != null && leaderPartyElement.ZoneName.Equals(currentAreaName))
+            // Compare with the "(N)" zone-level suffix stripped (see StripZoneLevelSuffix) -
+            // leaderPartyElement.ZoneName always carries it (e.g. "The Upper Prison (9)") while
+            // CurrentArea.DisplayName never does, so a raw comparison here never matched and
+            // this loop used to burn the full 10-second TIMEOUT_MS on every single transition
+            // before falling through to the timeout path below.
+            if (leaderPartyElement != null && followTarget != null &&
+                StripZoneLevelSuffix(leaderPartyElement.ZoneName).Equals(StripZoneLevelSuffix(currentAreaName)))
             {
                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                 {
@@ -550,8 +556,11 @@ public class AutoPilot
         var finalCurrentAreaName = AreWeThereYet.Instance.GameController.Area.CurrentArea.DisplayName;
 
         // --- THE NEW FAILSAFE LOGIC ---
-        // Check for the "Same Zone, Different Instance" problem.
-        if (finalLeaderPartyElement != null && finalLeaderPartyElement.ZoneName.Equals(finalCurrentAreaName))
+        // Check for the "Same Zone, Different Instance" problem. Same stripped comparison
+        // as the success condition above - otherwise the always-present zone-level suffix
+        // would make this branch fire as a false "deadlock" on every timeout.
+        if (finalLeaderPartyElement != null &&
+            StripZoneLevelSuffix(finalLeaderPartyElement.ZoneName).Equals(StripZoneLevelSuffix(finalCurrentAreaName)))
         {
             if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
             {
