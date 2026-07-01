@@ -310,6 +310,115 @@ public class AutoPilot
         }
     }
 
+    /// <summary>
+    /// Finds a clickable button for whatever confirmation popup is currently open, if any -
+    /// the known "are you sure you want to teleport" Yes/No dialog, or a generic single-button
+    /// (e.g. "OK") area-entry confirmation. While either is open the game won't register
+    /// mouseover/targeting on world entities, so this must be checked and dismissed before
+    /// transition-targeting logic can make progress.
+    /// </summary>
+    private Element GetOpenPopupButton()
+    {
+        var tpConfirm = GetTpConfirmation();
+        if (tpConfirm != null)
+            return tpConfirm;
+
+        try
+        {
+            var ui = AreWeThereYet.Instance.GameController?.IngameState?.IngameUi?.PopUpWindow;
+            if (ui == null || !ui.IsVisible)
+                return null;
+
+            return FindButtonByText(ui, "OK");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Recursively searches an element tree for a visible descendant whose text matches
+    /// (case-insensitive). Used to find popup buttons without depending on a fixed sibling
+    /// index, since different popup types (Yes/No vs. single OK) lay their buttons out
+    /// differently.
+    /// </summary>
+    private static Element FindButtonByText(Element root, string text)
+    {
+        if (root?.Children == null)
+            return null;
+
+        foreach (var child in root.Children)
+        {
+            if (child == null)
+                continue;
+
+            if (child.IsVisible && !string.IsNullOrEmpty(child.Text) &&
+                child.Text.Trim().Equals(text, StringComparison.OrdinalIgnoreCase))
+            {
+                return child;
+            }
+
+            var found = FindButtonByText(child, text);
+            if (found != null)
+                return found;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Fallback used when we can't get a transition label/entity to cooperate: click the
+    /// leader's party teleport icon and accept the resulting "are you sure" confirmation.
+    /// Shared by the "out of click attempts" path and the "entity never became targeted" path.
+    /// </summary>
+    private IEnumerator FallbackToPartyTeleport()
+    {
+        var fallbackLeader = GetLeaderPartyElement();
+        if (fallbackLeader == null)
+            yield break;
+
+        // Flag the transition again: clicking the party TP button also triggers a
+        // zone load / AreaChange().
+        _isTransitioning = true;
+        _transitioningStartTime = DateTime.Now;
+
+        // A confirmation may already be up.
+        var tpConfirmPre = GetTpConfirmation();
+        if (tpConfirmPre != null)
+        {
+            yield return Mouse.SetCursorPosHuman(tpConfirmPre.GetClientRect().Center);
+            yield return new WaitTime(200);
+            yield return Mouse.LeftClick();
+            yield return new WaitTime(1000);
+        }
+
+        var fallbackTpButton = GetTpButton(fallbackLeader);
+        if (!fallbackTpButton.Equals(Vector2.Zero))
+        {
+            yield return Mouse.SetCursorPosHuman(fallbackTpButton, false);
+            yield return new WaitTime(200);
+            yield return Mouse.LeftClick();
+            yield return new WaitTime(500);
+
+            // Accept the "travel to this player?" confirmation.
+            var tpConfirmPost = GetTpConfirmation();
+            if (tpConfirmPost != null)
+            {
+                yield return Mouse.SetCursorPosHuman(tpConfirmPost.GetClientRect().Center);
+                yield return new WaitTime(200);
+                yield return Mouse.LeftClick();
+                yield return new WaitTime(500);
+            }
+        }
+        else
+        {
+            // No TP button available - let the flag self-heal so detection resumes
+            // rather than staying wedged.
+            _isTransitioning = false;
+        }
+    }
+
     private IEnumerator MouseoverItem(Entity item)
     {
         var uiLoot = AreWeThereYet.Instance.GameController.IngameState.IngameUi.ItemsOnGroundLabels.FirstOrDefault(I => I.IsVisible && I.ItemOnGround.Id == item.Id);
@@ -813,6 +922,29 @@ public class AutoPilot
                             }
 
                             // ---------------------------------------------------------------
+                            // STEP 0: DISMISS ANY BLOCKING POPUP.
+                            // While a confirmation dialog (the "are you sure you want to
+                            // teleport" prompt, or a generic OK-only area-entry prompt) is open,
+                            // the game won't register mouseover/targeting on world entities - so
+                            // the "not targeted" wait in STEP 2 would spin forever without this.
+                            // ---------------------------------------------------------------
+                            var openPopup = GetOpenPopupButton();
+                            if (openPopup != null)
+                            {
+                                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                                {
+                                    AreWeThereYet.Instance.LogMessage("Dismissing open popup before continuing transition");
+                                }
+
+                                yield return Mouse.SetCursorPosHuman(openPopup.GetClientRect().Center);
+                                yield return new WaitTime(150);
+                                yield return Mouse.LeftClick();
+                                yield return new WaitTime(300);
+                                yield return null;
+                                continue;
+                            }
+
+                            // ---------------------------------------------------------------
                             // STEP 1: PATH TO THE TRANSITION.
                             // Click-to-move relying on a UI label uses the GAME'S navigation,
                             // which snags on walls (the "rubbing against a wall that wasn't at
@@ -887,18 +1019,41 @@ public class AutoPilot
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                             yield return new WaitTime(60);
 
-                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.Pos);
+                            var transitionScreenPos = Helper.WorldToValidScreenPosition(transitionEntity.BoundsCenterPos);
                             var targetable = transitionEntity.GetComponent<Targetable>();
 
                             if (targetable == null || !targetable.isTargeted)
                             {
-                                // Not targeted yet - mouseover and try again next tick.
+                                // Not targeted yet. Track how long we've been waiting - if the
+                                // entity never becomes targetable (bad hover point, occluded,
+                                // or a popup we didn't catch), give up after a timeout instead
+                                // of hovering forever, and fall back to the party TP button.
+                                currentTask.TargetWaitStartTime ??= DateTime.Now;
+                                var targetWaitElapsed = DateTime.Now - currentTask.TargetWaitStartTime.Value;
+                                var targetingTimeout = TimeSpan.FromMilliseconds(
+                                    AreWeThereYet.Instance.Settings.AutoPilot.TransitionTargetingTimeout.Value);
+
+                                if (targetWaitElapsed > targetingTimeout)
+                                {
+                                    if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                                    {
+                                        AreWeThereYet.Instance.LogMessage($"Transition never became targeted after {targetWaitElapsed.TotalSeconds:F1}s - falling back to party teleport button");
+                                    }
+
+                                    tasks.RemoveAt(0); // give up on the label
+                                    yield return FallbackToPartyTeleport();
+                                    yield return null;
+                                    continue;
+                                }
+
+                                // Still within the timeout - mouseover and try again next tick.
                                 yield return Mouse.SetCursorPosHuman(transitionScreenPos);
                                 yield return new WaitTime(30 + random.Next(AreWeThereYet.Instance.Settings.AutoPilot.InputFrequency));
                                 yield return null;
                                 continue;
                             }
 
+                            currentTask.TargetWaitStartTime = null;
                             currentTask.AttemptCount++;
                             _isTransitioning = true;
                             _transitioningStartTime = DateTime.Now;
@@ -959,50 +1114,7 @@ public class AutoPilot
                             }
 
                             tasks.RemoveAt(0); // give up on the label
-
-                            var fallbackLeader = GetLeaderPartyElement();
-                            if (fallbackLeader != null)
-                            {
-                                // Flag the transition again: clicking the party TP button also
-                                // triggers a zone load / AreaChange().
-                                _isTransitioning = true;
-                                _transitioningStartTime = DateTime.Now;
-
-                                // A confirmation may already be up.
-                                var tpConfirmPre = GetTpConfirmation();
-                                if (tpConfirmPre != null)
-                                {
-                                    yield return Mouse.SetCursorPosHuman(tpConfirmPre.GetClientRect().Center);
-                                    yield return new WaitTime(200);
-                                    yield return Mouse.LeftClick();
-                                    yield return new WaitTime(1000);
-                                }
-
-                                var fallbackTpButton = GetTpButton(fallbackLeader);
-                                if (!fallbackTpButton.Equals(Vector2.Zero))
-                                {
-                                    yield return Mouse.SetCursorPosHuman(fallbackTpButton, false);
-                                    yield return new WaitTime(200);
-                                    yield return Mouse.LeftClick();
-                                    yield return new WaitTime(500);
-
-                                    // Accept the "travel to this player?" confirmation.
-                                    var tpConfirmPost = GetTpConfirmation();
-                                    if (tpConfirmPost != null)
-                                    {
-                                        yield return Mouse.SetCursorPosHuman(tpConfirmPost.GetClientRect().Center);
-                                        yield return new WaitTime(200);
-                                        yield return Mouse.LeftClick();
-                                        yield return new WaitTime(500);
-                                    }
-                                }
-                                else
-                                {
-                                    // No TP button available - let the flag self-heal so
-                                    // detection resumes rather than staying wedged.
-                                    _isTransitioning = false;
-                                }
-                            }
+                            yield return FallbackToPartyTeleport();
 
                             yield return null;
                             continue;

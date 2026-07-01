@@ -36,6 +36,14 @@ public class TaskNode
     /// </summary>
     public Entity TransitionEntity { get; set; }
 
+    /// <summary>
+    /// When we first started hovering a transition entity waiting for it to report
+    /// isTargeted == true. Null while we haven't started waiting (or after it's been
+    /// reset). Used to time out the "hover and wait" loop so we don't spin forever if
+    /// the entity never becomes targetable (e.g. a blocking popup, or a bad hover point).
+    /// </summary>
+    public System.DateTime? TargetWaitStartTime { get; set; }
+
     public TaskNode(Vector3 position, int bounds, TaskNodeType type = TaskNodeType.Movement)
     {
         WorldPosition = position;

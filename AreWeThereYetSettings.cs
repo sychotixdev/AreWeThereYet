@@ -47,6 +47,9 @@ public class AutoPilotSettings
     [Menu("Transition Wait Time (ms)", "How long to wait for a zone load after clicking a transition before treating the click as failed.")]
     public RangeNode<int> TransitionWaitTime { get; set; } = new(2500, 500, 10000);
 
+    [Menu("Transition Targeting Timeout (ms)", "How long to keep hovering a transition waiting for it to become targeted before giving up and falling back to the party teleport button.")]
+    public RangeNode<int> TransitionTargetingTimeout { get; set; } = new(4000, 1000, 15000);
+
     [Menu("Zone Update Buffer (ms)")]
     public RangeNode<int> ZoneUpdateBuffer { get; set; } = new(1000, 500, 5000);
 
