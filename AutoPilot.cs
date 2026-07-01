@@ -206,6 +206,34 @@ public class AutoPilot
         }
     }
 
+    /// <summary>
+    /// Finds the closest AreaTransition entity to a given position, with no zone-name
+    /// filtering. Used for the "same zone, leader missing" case: an intra-zone area
+    /// transition can move the leader to a different physical area/instance without
+    /// changing the reported zone name, so the name-matching in
+    /// GetBestAreaTransitionEntity can't identify the right one there. Once we've
+    /// finished walking the leader's last breadcrumb trail, the nearest transition to
+    /// where that trail ended is assumed to be the one they took.
+    /// </summary>
+    private Entity GetClosestAreaTransitionEntity(Vector3 fromPos)
+    {
+        try
+        {
+            var allTransitions = AreWeThereYet.Instance.GameController?.EntityListWrapper?.ValidEntitiesByType[EntityType.AreaTransition]
+                ?.Where(x => x != null && x.IsValid)
+                .ToList() ?? new List<Entity>();
+
+            return allTransitions
+                .OrderBy(x => Vector3.Distance(fromPos, x.Pos))
+                .FirstOrDefault();
+        }
+        catch (Exception ex)
+        {
+            AreWeThereYet.Instance.LogError($"GetClosestAreaTransitionEntity failed: {ex.Message}");
+            return null;
+        }
+    }
+
     private LabelOnGround GetMercenaryOptInButton()
     {
         try
@@ -713,6 +741,63 @@ public class AutoPilot
                     }
 
                     yield return new WaitTime(200); // Wait a bit longer for zone info to stabilize
+                }
+            }
+            else if (followTarget == null && !_isTransitioning && leaderPartyElement != null &&
+                     leaderPartyElement.ZoneName.Equals(AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName))
+            {
+                // SAME ZONE, LEADER ENTITY MISSING: the leader is reported to be in THIS
+                // zone (otherwise the cross-zone branch above would have handled it), but
+                // their entity can't be found. That's the signature of an intra-zone area
+                // transition: some transitions move you to a different physical area/
+                // instance without changing the displayed zone name, so the name-matching
+                // in GetBestAreaTransitionEntity can't tell us which transition it was.
+                // Finish whatever breadcrumb trail we still have (the leader's last valid
+                // recorded path) first, then once that's exhausted, assume the closest
+                // area transition to where the trail ended is the one they took.
+                _lastKnownLeaderZone = "";
+                _leaderZoneChangeTime = DateTime.MinValue;
+
+                var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
+                var reachedBounds = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.ReachedBounds.Value;
+
+                var walkedTrail = false;
+                if (pfEnabled && AreWeThereYet.Instance.leaderFollower.HasTrail &&
+                    AreWeThereYet.Instance.leaderFollower.TrailEnd is Vector3 trailEnd)
+                {
+                    var nav = AreWeThereYet.Instance.leaderFollower.NavigateTo(
+                        AreWeThereYet.Instance.playerPosition, trailEnd,
+                        allowTrailFollow: true,
+                        arriveWithin: AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value);
+
+                    if (nav.Type != FollowResultType.Idle)
+                    {
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        {
+                            AreWeThereYet.Instance.LogMessage("Leader missing in same zone - finishing last valid path before assuming an intra-zone transition");
+                        }
+                        tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                        tasks.Add(new TaskNode(nav.WorldPosition, reachedBounds, TaskNodeType.Movement));
+                        walkedTrail = true;
+                    }
+                }
+
+                if (!walkedTrail && !tasks.Exists(t => t.Type == TaskNodeType.Transition))
+                {
+                    // Trail exhausted (or there was none / pathfinding disabled) - the
+                    // leader vanished at roughly this point, so assume the nearest area
+                    // transition is the intra-zone one they took.
+                    var fromPos = AreWeThereYet.Instance.leaderFollower.TrailEnd ?? AreWeThereYet.Instance.playerPosition;
+                    var closestTransition = GetClosestAreaTransitionEntity(fromPos);
+                    if (closestTransition != null)
+                    {
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        {
+                            AreWeThereYet.Instance.LogMessage($"Same-zone transition assumed: closest transition '{closestTransition.RenderName}' at distance {Vector3.Distance(fromPos, closestTransition.Pos):F0}");
+                        }
+                        tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                        tasks.Add(new TaskNode(closestTransition, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
+                    }
                 }
             }
             else if (followTarget != null)
