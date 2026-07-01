@@ -380,6 +380,49 @@ public class AutoPilot
     
     private IEnumerator AutoPilotLogic()
     {
+        // Resilience wrapper: drive the core iteration logic and recover from any
+        // unhandled exception so a single transient null (e.g. a party element that
+        // briefly disappears while the leader is loading into a new zone) can't tear
+        // down the whole coroutine.
+        // NOTE: C# forbids 'yield' inside a try/catch (and inside a catch block), so we
+        // drive the inner iterator manually - MoveNext() runs inside the try, and every
+        // 'yield' happens outside it based on flags the try/catch sets.
+        var inner = AutoPilotLogicCore();
+        while (true)
+        {
+            object current = null;
+            bool moved = false;
+            bool faulted = false;
+            try
+            {
+                moved = inner.MoveNext();
+                if (moved)
+                    current = inner.Current;
+            }
+            catch (Exception ex)
+            {
+                AreWeThereYet.Instance.LogError($"[AutoPilot] Recovered from unhandled exception in core logic: {ex.Message}");
+                faulted = true;
+            }
+
+            if (faulted)
+            {
+                // A faulted iterator cannot be resumed - recreate it to restart cleanly
+                // from the top of the loop. Instance state (tasks, flags) is preserved.
+                inner = AutoPilotLogicCore();
+                yield return new WaitTime(100);
+                continue;
+            }
+
+            if (!moved)
+                yield break; // Core loop is infinite; only reached if it ever exits.
+
+            yield return current;
+        }
+    }
+
+    private IEnumerator AutoPilotLogicCore()
+    {
         while (true)
         {
             // =================================================================
@@ -436,7 +479,8 @@ public class AutoPilot
             followTarget = GetFollowingTarget();
             var leaderPartyElement = GetLeaderPartyElement();
 
-            if (followTarget == null && !leaderPartyElement.ZoneName.Equals(AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName) && !_isTransitioning)
+            if (followTarget == null && !_isTransitioning && leaderPartyElement != null &&
+                !leaderPartyElement.ZoneName.Equals(AreWeThereYet.Instance.GameController?.Area.CurrentArea.DisplayName))
             {
                 // Track zone changes for buffer timing
                 if (!_lastKnownLeaderZone.Equals(leaderPartyElement.ZoneName))
