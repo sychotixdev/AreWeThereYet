@@ -340,6 +340,18 @@ public class LeaderFollower
                         foreach (var g in smoothed)
                             _trail.Add(Helper.ToWorld(g));
 
+                        // The path (and its leading point, path[0]) was computed from the
+                        // player's grid position AT REQUEST TIME. The search runs on a
+                        // background thread, so by the time it completes the player has
+                        // usually moved further along - leaving _trail[0] sitting BEHIND
+                        // the player's current position. Left in place, that stale point
+                        // is trivially "reachable" by a straight line (it's right next to
+                        // us) and step 5 below would happily send us back to it - the
+                        // "snaps back to where we already were" bug. Prune with the same
+                        // reached/passed logic as step 4, but against the CURRENT player
+                        // position, immediately after installing the new trail.
+                        PruneTrail(playerPos);
+
                         _portalSuspected = false;
                         if (LogEnabled)
                         {
@@ -365,24 +377,11 @@ public class LeaderFollower
             _searchTask = null;
         }
 
-        // 4. Prune trail points we've already reached OR passed.
-        //    (a) Reached: within ReachedBounds of us.
-        //    (b) Passed: the trail is rebuilt from JPS every tick with _trail[0] = the
-        //        start cell (where we were last tick). Once we advance, that start point
-        //        sits BEHIND us but is still further than ReachedBounds, so (a) leaves it
-        //        in place. Step 5 could then string-pull back to it whenever the forward
-        //        line is briefly blocked (e.g. a doorway narrower than the clearance
-        //        band), walking us backward — then forward clears next tick and we bounce
-        //        left/right in place. We treat _trail[0] as passed when we are closer to
-        //        the NEXT point than _trail[0] is: that means we're already on the far
-        //        side of it along the route. This only prunes points behind us, so it is
-        //        safe for legitimate "move away from the goal to round an obstacle" motion.
-        int reachedBounds = PfSettings.ReachedBounds.Value;
-        while (_trail.Count > 0 && Vector3.Distance(playerPos, _trail[0]) <= reachedBounds)
-            _trail.RemoveAt(0);
-        while (_trail.Count >= 2 &&
-               Vector3.Distance(playerPos, _trail[1]) <= Vector3.Distance(_trail[0], _trail[1]))
-            _trail.RemoveAt(0);
+        // 4. Prune trail points we've already reached OR passed (see PruneTrail).
+        //    Guards against walking backward to a stale leading waypoint - either the
+        //    previous tick's start cell, or (now also handled at the step-3 call site)
+        //    a background search's request-time start cell.
+        PruneTrail(playerPos);
 
         // 5. Is any part of the route reachable by a straight WALKABLE line? Walkability
         //    (not line-of-sight) is required: LOS permits see-through/dashable gaps that
@@ -476,6 +475,27 @@ public class LeaderFollower
 
         // 8. No path and no last known location → wait.
         return FollowResult.Idle;
+    }
+
+    /// <summary>
+    /// Drops trail points that are already reached or passed relative to
+    /// <paramref name="playerPos"/>:
+    ///   (a) Reached: within ReachedBounds of us.
+    ///   (b) Passed: we're already closer to the NEXT point than _trail[0] is to it,
+    ///       meaning we're on the far side of _trail[0] along the route.
+    /// Shared by the normal per-tick trail advance AND by fresh-trail installation
+    /// (a background JPS result can be seeded from a stale, now-behind-us start
+    /// point - see the call site in step 3) so a newly replaced trail can never
+    /// lead with a waypoint that's already behind the player.
+    /// </summary>
+    private void PruneTrail(Vector3 playerPos)
+    {
+        int reachedBounds = PfSettings.ReachedBounds.Value;
+        while (_trail.Count > 0 && Vector3.Distance(playerPos, _trail[0]) <= reachedBounds)
+            _trail.RemoveAt(0);
+        while (_trail.Count >= 2 &&
+               Vector3.Distance(playerPos, _trail[1]) <= Vector3.Distance(_trail[0], _trail[1]))
+            _trail.RemoveAt(0);
     }
 
     // -----------------------------------------------------------------------
