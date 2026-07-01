@@ -707,16 +707,35 @@ public class AutoPilot
                                 _lastMoveDiagLog = now;
                                 var curPos = AreWeThereYet.Instance.playerPosition;
                                 var screenPos = Helper.WorldToValidScreenPosition(currentTask.WorldPosition);
-                                var movedSinceLastLog = _lastMoveDiagPos == Vector3.Zero
-                                    ? 0f
-                                    : Vector3.Distance(curPos, _lastMoveDiagPos);
+
+                                // Actual movement heading (where we really went) vs. the bearing
+                                // to the intended target (where we meant to go). A large gap
+                                // between the two — despite a sane target — points at click/
+                                // execution/game-movement, not our pathing logic.
+                                var movedSinceLastLog = 0f;
+                                var headingDiff = "n/a";
+                                if (_lastMoveDiagPos != Vector3.Zero)
+                                {
+                                    var delta = curPos - _lastMoveDiagPos;
+                                    movedSinceLastLog = delta.Length();
+                                    if (movedSinceLastLog > 5f)
+                                    {
+                                        var actualHeading = Math.Atan2(delta.Y, delta.X) * 180.0 / Math.PI;
+                                        var targetBrg = Math.Atan2(
+                                            currentTask.WorldPosition.Y - curPos.Y,
+                                            currentTask.WorldPosition.X - curPos.X) * 180.0 / Math.PI;
+                                        var diff = Math.Abs(actualHeading - targetBrg);
+                                        if (diff > 180) diff = 360 - diff;
+                                        headingDiff = $"{diff:F0}(act={actualHeading:F0},want={targetBrg:F0})";
+                                    }
+                                }
                                 _lastMoveDiagPos = curPos;
 
                                 AreWeThereYet.Instance.LogMessage(
                                     $"[ATY-PF] MoveExec | player world({curPos.X:F0},{curPos.Y:F0}) | " +
                                     $"target world({currentTask.WorldPosition.X:F0},{currentTask.WorldPosition.Y:F0}) " +
                                     $"taskDist={taskDistance:F0} | screenClick=({screenPos.X:F0},{screenPos.Y:F0}) | " +
-                                    $"movedSinceLastLog={movedSinceLastLog:F1}");
+                                    $"movedSinceLastLog={movedSinceLastLog:F1} | headingDiff={headingDiff}");
                             }
                         }
 

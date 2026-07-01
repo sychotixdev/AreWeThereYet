@@ -42,6 +42,7 @@ public static class Helper
 
     internal static Random random = new Random();
     private static Camera Camera => AreWeThereYet.Instance.GameController.Game.IngameState.Camera;
+    private static DateTime _lastScreenClampLog = DateTime.MinValue;
         
     internal static float MoveTowards(float cur, float tar, float max)
     {
@@ -91,7 +92,12 @@ public static class Helper
 
         var dir = result - center;
         if (dir.X == 0f && dir.Y == 0f)
+        {
+            if (AreWeThereYet.Instance.Settings.Debug.LogPathfinding.Value)
+                AreWeThereYet.Instance.LogMessage(
+                    $"[ATY-PF] ScreenClamp DEGENERATE rawScreen({screenPos.X:F0},{screenPos.Y:F0}) -> center");
             return center; // degenerate: target projects onto our own screen position
+        }
 
         // Largest t in (0,1] that keeps (center + dir * t) inside the safe box —
         // i.e. where the ray from center toward the target first crosses the
@@ -100,7 +106,22 @@ public static class Helper
         var tx = dir.X != 0f ? halfWidth / Math.Abs(dir.X) : float.PositiveInfinity;
         var ty = dir.Y != 0f ? halfHeight / Math.Abs(dir.Y) : float.PositiveInfinity;
         var t = Math.Min(1f, Math.Min(tx, ty));
+        var clamped = center + dir * t;
 
-        return center + dir * t;
+        if (AreWeThereYet.Instance.Settings.Debug.LogPathfinding.Value)
+        {
+            var now = DateTime.Now;
+            var interval = AreWeThereYet.Instance.Settings.Debug.PathfindingLogInterval.Value;
+            if ((now - _lastScreenClampLog).TotalMilliseconds >= interval)
+            {
+                _lastScreenClampLog = now;
+                var brg = Math.Atan2(dir.Y, dir.X) * 180.0 / Math.PI;
+                AreWeThereYet.Instance.LogMessage(
+                    $"[ATY-PF] ScreenClamp rawScreen({screenPos.X:F0},{screenPos.Y:F0}) " +
+                    $"clamped({clamped.X:F0},{clamped.Y:F0}) dirBrg={brg:F0} t={t:F2}");
+            }
+        }
+
+        return clamped;
     }
 }
