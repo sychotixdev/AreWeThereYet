@@ -173,7 +173,7 @@ public class AutoPilot
                     var allPortals = AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ItemsOnGroundLabels
                         .Where(x => x != null && x.IsVisible && x.Label != null && x.Label.IsValid &&
                                 x.Label.IsVisible && x.ItemOnGround != null &&
-                                (x.ItemOnGround.Metadata.ToLower().Contains("areatransition") ||
+                                (x.ItemOnGround.Metadata.ToLower().Contains("transition") ||
                                     x.ItemOnGround.Metadata.ToLower().Contains("portal")))
                         .ToList();
 
