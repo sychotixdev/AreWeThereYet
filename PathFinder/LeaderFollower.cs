@@ -67,6 +67,12 @@ public class LeaderFollower
     // trail being re-anchored) nearly every tick when the target is far away.
     private DateTime _lastAstarRequestTime = DateTime.MinValue;
 
+    // The target world position used for the last background search request. Compared
+    // against the current target in ShouldRefreshAstar so a healthy trail isn't
+    // re-searched just because time passed - only when the target actually moved
+    // meaningfully (or the trail is running low).
+    private Vector3? _lastAstarRequestGoal;
+
     // Set at the end of the current tick's trail scan (step 5): true when NOTHING on
     // the trail was reachable, even after the clearance=0 fallback. Read at the START
     // of the NEXT tick's step 3 to force an A* refresh — otherwise the "only refresh
@@ -122,6 +128,7 @@ public class LeaderFollower
         _portalSuspected = false;
         _lastReachablePos = null;
         _lastPlayerPos = null;
+        _lastAstarRequestGoal = null;
         _trailUnreachableThisTick = false;
         CancelSearch();
     }
@@ -493,9 +500,11 @@ public class LeaderFollower
                     _trail.RemoveRange(0, bestIdx); // discard skipped breadcrumbs
 
                 // If the target has outrun the breadcrumb trail, refresh it with a real A*
-                // path in the background before we run out of reachable points.
-                if (distToTarget > PfSettings.AcquireDistance.Value &&
-                    (_searchTask == null || _searchTask.IsCompleted))
+                // path in the background before we run out of reachable points. Gated by
+                // ShouldRefreshAstar so a healthy, still-relevant trail isn't re-searched
+                // on a blanket timer (see its comment).
+                if ((_searchTask == null || _searchTask.IsCompleted) &&
+                    ShouldRefreshAstar(distToTarget, targetPos))
                     RequestAstar(playerPos, targetPos);
 
                 return FollowResult.MoveTo(_trail[0]);
@@ -651,17 +660,41 @@ public class LeaderFollower
     // Background A* fallback
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Decides whether a healthy trail is actually worth re-searching. Previously any
+    /// tick with distToTarget > AcquireDistance requested a fresh background search
+    /// (subject only to the AstarRecomputeIntervalMs cooldown), which fired on a
+    /// near-constant timer whenever the leader was far away - almost every result came
+    /// back "discarded - existing trail still usable" because nothing had actually
+    /// changed. A search is only useful here if either (a) the trail is running low and
+    /// will need topping up soon, or (b) the target has moved far enough since the last
+    /// search that the old route may no longer be the best one.
+    /// </summary>
+    private bool ShouldRefreshAstar(float distToTarget, Vector3 targetPos)
+    {
+        if (distToTarget <= PfSettings.AcquireDistance.Value) return false;
+
+        // Trail almost exhausted — worth topping up regardless of how far the target moved.
+        if (_trail.Count <= PfSettings.TrailRefillThreshold.Value) return true;
+
+        // Trail still has plenty of usable points. Only bother if the target itself has
+        // relocated meaningfully since our last search (e.g. the leader moved on) -
+        // otherwise the existing route is still the right one and re-running JPS just
+        // burns CPU for a result we'll throw away.
+        if (_lastAstarRequestGoal is not Vector3 lastGoal) return true; // never searched yet
+        return Vector3.Distance(lastGoal, targetPos) > PfSettings.RecomputeMoveThreshold.Value;
+    }
+
     private void RequestAstar(Vector3 startWorld, Vector3 goalWorld)
     {
-        // Cooldown: a search can complete in well under 1ms, and callers ask for a
-        // refresh on every tick the target is beyond AcquireDistance. Without this
-        // throttle we were re-searching (and, previously, re-anchoring the trail)
-        // nearly every tick — see the trail-replacement guard above for why that
-        // caused the follower to flip-flop between waypoints in narrow corridors.
+        // Cooldown: a search can complete in well under 1ms. Kept as a hard floor even
+        // now that ShouldRefreshAstar gates most redundant requests, in case the target
+        // is oscillating right at the RecomputeMoveThreshold boundary.
         var now = DateTime.Now;
         if ((now - _lastAstarRequestTime).TotalMilliseconds < PfSettings.AstarRecomputeIntervalMs.Value)
             return;
         _lastAstarRequestTime = now;
+        _lastAstarRequestGoal = goalWorld;
 
         var terrain = LineOfSight.GetTerrainData();
         if (terrain == null) return;

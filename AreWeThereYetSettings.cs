@@ -101,6 +101,20 @@ public class AutoPilotSettings
         // projection is known to handle correctly.
         [Menu("Max Click Distance (world units, cap on TrailScan target selection)")]
         public RangeNode<int> MaxClickDistance { get; set; } = new(1200, 200, 3000);
+
+        // Previously, any tick where distToTarget > AcquireDistance requested a fresh
+        // background search (subject only to the AstarRecomputeIntervalMs cooldown) -
+        // regardless of whether the existing trail already had plenty of usable points
+        // left. With a far leader that's most ticks for most of a run, so JPS fired on
+        // a near-constant timer and almost every result was logged "discarded - existing
+        // trail still usable". These two settings let a healthy, still-relevant trail
+        // be left alone: only top it up when it's actually running low, or when the
+        // target has moved far enough that the old search is stale.
+        [Menu("Trail Refill Threshold (points remaining before requesting a background search)")]
+        public RangeNode<int> TrailRefillThreshold { get; set; } = new(4, 1, 20);
+
+        [Menu("Recompute Move Threshold (world units the target must move to justify a re-search)")]
+        public RangeNode<int> RecomputeMoveThreshold { get; set; } = new(400, 100, 2000);
     }
 
     [Submenu(CollapsedByDefault = true)]
