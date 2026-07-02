@@ -1692,6 +1692,11 @@ public class AutoPilot
                 AreWeThereYet.Instance?.Settings?.AutoPilot?.MovementSkillEnabled?.Value != true)
                 return false;
 
+            // Never cast movement skills in town - most are disabled/pointless there
+            // and some (e.g. leap-type skills) can misbehave against town geometry.
+            if (AreWeThereYet.Instance.GameController.Area.CurrentArea?.IsTown == true)
+                return false;
+
             if (!IsMovementSkillReady())
                 return false;
 
