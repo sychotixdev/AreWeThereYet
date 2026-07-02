@@ -468,7 +468,19 @@ public class AutoPilot
         {
             var ui = AreWeThereYet.Instance.GameController?.IngameState?.IngameUi?.PopUpWindow;
 
-            if (ui.GetChildFromIndices(0,0,0)?.Text.Equals("Are you sure you want to teleport to this player's location?") == true)
+            // The popup window (and its text child) can stay populated with the last
+            // dialog's text even after it's closed - ExileCore elements don't clear
+            // cached text on hide. Without checking IsVisible here, this keeps matching
+            // a stale "are you sure you want to teleport" dialog forever after the first
+            // time it's shown, causing a phantom confirmation click before the real
+            // portal/TP button click below (which can eat the click or shift focus so
+            // the TP button click misses).
+            if (ui == null || !ui.IsVisible)
+                return null;
+
+            var textElement = ui.GetChildFromIndices(0, 0, 0);
+            if (textElement != null && textElement.IsVisible &&
+                textElement.Text?.Equals("Are you sure you want to teleport to this player's location?") == true)
                 return ui.TwoButtonWindowOk;
 
             return null;
