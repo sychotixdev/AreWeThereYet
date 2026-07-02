@@ -702,28 +702,13 @@ public class AutoPilot
                 AreWeThereYet.Instance.LogMessage($"[GracePeriod] DEADLOCK DETECTED: In same zone ('{finalCurrentAreaName}') but different instance. Forcing UI teleport to sync instances.", 10, Color.Red);
             }
 
-            // Check for and click the "Are you sure?" confirmation box if it's open.
-            var tpConfirmation = GetTpConfirmation();
-            if (tpConfirmation != null)
-            {
-                // GetClientRect() is window-relative - add the window's top-left, same as
-                // GetTpButton, so the click lands correctly in windowed mode.
-                var confirmWindowOffset = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle().TopLeft;
-                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center + confirmWindowOffset);
-                yield return new WaitTime(200);
-                yield return Mouse.LeftClick();
-                yield return new WaitTime(1000);
-            }
-
-            // Click the teleport button on the party UI to force an instance sync.
-            var tpButton = GetTpButton(finalLeaderPartyElement);
-            if (!tpButton.Equals(Vector2.Zero))
-            {
-                yield return Mouse.SetCursorPosHuman(tpButton, false);
-                yield return new WaitTime(200);
-                yield return Mouse.LeftClick();
-                yield return new WaitTime(200);
-            }
+            // Same "click confirmation if open, then click the party TP button" sequence
+            // used everywhere else we fall back to the teleport button - see
+            // FallbackToPartyTeleport for the other call sites (cross-zone path skipped/
+            // exhausted, transition targeting timeout, transition click attempts
+            // exhausted). Kept in one place so the click/confirmation-dialog handling is
+            // identical no matter which failure path triggered it.
+            yield return FallbackToPartyTeleport();
         }
         else
         {
@@ -911,13 +896,27 @@ public class AutoPilot
                         // party teleport, finish walking the leader's breadcrumb trail toward
                         // where they vanished (the portal) - just like following the leader.
                         // The label becomes visible as we close in, and the Transition task
-                        // above takes over. Only teleport once the trail is exhausted (we've
-                        // arrived but still see no label) or pathfinding is disabled.
+                        // above takes over. We give up on walking and teleport instead once
+                        // the trail is exhausted (we've arrived but still see no label),
+                        // pathfinding is disabled, or (see skipLongPath below) the remaining
+                        // trail is long enough that walking it isn't worth it.
                         var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
                         var reachedBounds = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.ReachedBounds.Value;
 
+                        // The leader just changed zones and left us a long breadcrumb trail
+                        // to walk before we'd even reach the portal they used. Walking it out
+                        // start-to-finish wastes time the party teleport button would skip
+                        // entirely - so once the remaining trail distance (actual walking
+                        // distance, not straight-line - see TrailRemainingDistance) exceeds
+                        // MaxZoneChangePathDistance, skip straight to the teleport fallback
+                        // below instead of only teleporting once the trail is exhausted.
+                        var skipLongPath = AreWeThereYet.Instance.Settings.AutoPilot.SkipLongPathOnZoneChange.Value &&
+                            pfEnabled && AreWeThereYet.Instance.leaderFollower.HasTrail &&
+                            AreWeThereYet.Instance.leaderFollower.TrailRemainingDistance(AreWeThereYet.Instance.playerPosition) >
+                                AreWeThereYet.Instance.Settings.AutoPilot.MaxZoneChangePathDistance.Value;
+
                         var walkedTrail = false;
-                        if (pfEnabled && AreWeThereYet.Instance.leaderFollower.HasTrail &&
+                        if (!skipLongPath && pfEnabled && AreWeThereYet.Instance.leaderFollower.HasTrail &&
                             AreWeThereYet.Instance.leaderFollower.TrailEnd is Vector3 trailEnd)
                         {
                             var nav = AreWeThereYet.Instance.leaderFollower.NavigateTo(
@@ -941,30 +940,22 @@ public class AutoPilot
                         {
                             if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                             {
-                                AreWeThereYet.Instance.LogMessage("No suitable portal found and no trail to follow - using teleport button fallback");
+                                AreWeThereYet.Instance.LogMessage(skipLongPath
+                                    ? "Remaining trail after leader's zone change exceeds Max Zone Change Path Distance - skipping the walk and using party teleport button"
+                                    : "No suitable portal found and no trail to follow - using teleport button fallback");
                             }
 
-                            var tpConfirmation = GetTpConfirmation();
-                            if (tpConfirmation != null)
-                            {
-                                // GetClientRect() is window-relative - add the window's
-                                // top-left, same as GetTpButton, so the click lands
-                                // correctly in windowed mode.
-                                var confirmWindowOffset = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle().TopLeft;
-                                yield return Mouse.SetCursorPosHuman(tpConfirmation.GetClientRect().Center + confirmWindowOffset);
-                                yield return new WaitTime(200);
-                                yield return Mouse.LeftClick();
-                                yield return new WaitTime(1000);
-                            }
+                            // Drop any queued Movement task - we're teleporting instead of
+                            // walking, so a stale walk target shouldn't linger in the queue.
+                            tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
 
-                            var tpButton = GetTpButton(leaderPartyElement);
-                            if (!tpButton.Equals(Vector2.Zero))
-                            {
-                                yield return Mouse.SetCursorPosHuman(tpButton, false);
-                                yield return new WaitTime(200);
-                                yield return Mouse.LeftClick();
-                                yield return new WaitTime(200);
-                            }
+                            // Single shared implementation for "click the party teleport icon
+                            // and accept the confirmation" - see FallbackToPartyTeleport for
+                            // the other two call sites (transition targeting timeout, transition
+                            // click attempts exhausted). Keeping this in one place means the
+                            // button click/confirmation-dialog handling behaves identically no
+                            // matter which path triggered the fallback.
+                            yield return FallbackToPartyTeleport();
                         }
                     }
                 }

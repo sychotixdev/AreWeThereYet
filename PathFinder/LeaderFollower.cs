@@ -120,6 +120,25 @@ public class LeaderFollower
     public Vector3? TrailEnd => _trail.Count > 0 ? _trail[^1] : (Vector3?)null;
 
     /// <summary>
+    /// Sum of segment lengths from playerPos through every remaining trail point, in order.
+    /// This is the actual walking distance left on the breadcrumb path - not the straight-line
+    /// distance to TrailEnd, which understates a winding route (stairs, doorways, terrain that
+    /// forced the trail to bend). Used to decide whether the remaining path to a leader who just
+    /// changed zones is long enough to skip walking it and teleport instead.
+    /// </summary>
+    public float TrailRemainingDistance(Vector3 playerPos)
+    {
+        if (_trail.Count == 0)
+            return 0f;
+
+        var total = Vector3.Distance(playerPos, _trail[0]);
+        for (int i = 0; i < _trail.Count - 1; i++)
+            total += Vector3.Distance(_trail[i], _trail[i + 1]);
+
+        return total;
+    }
+
+    /// <summary>
     /// Call on area change: clears trail, cancels any in-flight search.
     /// </summary>
     public void Reset()
