@@ -490,8 +490,8 @@ namespace AreWeThereYet.Utils
                     return false;
 
                 case 2:  // Static objects (doors, chests, decorations) - dashable
-                         // Only passable if dash is enabled, otherwise block
-                    return AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled?.Value == true;
+                         // Only passable if the movement skill is enabled, otherwise block
+                    return AreWeThereYet.Instance.Settings.AutoPilot.MovementSkillEnabled?.Value == true;
 
                 case 1:  // Basic walkable terrain - ??? i guess
                 case 5:  // Open walkable space
@@ -895,7 +895,7 @@ namespace AreWeThereYet.Utils
         /// <summary>
         /// Strict walkability predicate: blocked (0) and dashable/ranged-only (2) are
         /// NOT walkable. Everything else (1, 5, and conservative higher values) is.
-        /// Independent of the DashEnabled setting, unlike <see cref="IsTerrainPassable"/>.
+        /// Independent of the MovementSkillEnabled setting, unlike <see cref="IsTerrainPassable"/>.
         /// </summary>
         private bool IsTerrainWalkable(Vector2 pos)
         {

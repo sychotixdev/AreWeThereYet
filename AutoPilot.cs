@@ -1242,13 +1242,14 @@ public class AutoPilot
                             }
                         }
 
-                        if (AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled &&
-                        ShouldUseDash(currentTask.WorldPosition.WorldToGrid()))
+                        if (ShouldUseMovementSkill(currentTask.WorldPosition.WorldToGrid()))
                         {
                             yield return Mouse.SetCursorPosHuman(Helper.WorldToValidScreenPosition(currentTask.WorldPosition));
                             yield return new WaitTime(random.Next(25) + 30);
-                            Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.DashKey);
+                            Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.MovementSkillKey);
                             yield return new WaitTime(random.Next(25) + 30);
+                            if (AreWeThereYet.Instance.Settings.AutoPilot.MovementSkill.SkillKind == MovementSkillKind.LeapOrCharge)
+                                yield return new WaitTime(AreWeThereYet.Instance.Settings.AutoPilot.MovementSkill.LeapTravelTimeMs.Value);
                         }
                         else
                         {
@@ -1408,13 +1409,14 @@ public class AutoPilot
                                 var (_, moveClickScreenPos) = Helper.GetReliableClickPoint(
                                     AreWeThereYet.Instance.playerPosition, moveTarget);
 
-                                if (AreWeThereYet.Instance.Settings.AutoPilot.DashEnabled &&
-                                    ShouldUseDash(moveTarget.WorldToGrid()))
+                                if (ShouldUseMovementSkill(moveTarget.WorldToGrid()))
                                 {
                                     yield return Mouse.SetCursorPosHuman(moveClickScreenPos);
                                     yield return new WaitTime(random.Next(25) + 30);
-                                    Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.DashKey);
+                                    Keyboard.KeyPress(AreWeThereYet.Instance.Settings.AutoPilot.MovementSkillKey);
                                     yield return new WaitTime(random.Next(25) + 30);
+                                    if (AreWeThereYet.Instance.Settings.AutoPilot.MovementSkill.SkillKind == MovementSkillKind.LeapOrCharge)
+                                        yield return new WaitTime(AreWeThereYet.Instance.Settings.AutoPilot.MovementSkill.LeapTravelTimeMs.Value);
                                 }
                                 else
                                 {
@@ -1635,50 +1637,95 @@ public class AutoPilot
         }
     }
 
-    private bool ShouldUseDash(Vector2 targetPosition)
+    // Looks up the configured movement skill by name in the player's ActorSkills
+    // and reports whether the game currently considers it usable (off cooldown,
+    // has charges, not otherwise disabled). Deliberately re-queried every call
+    // rather than cached - ActorSkills readiness can flip within a tick (e.g. a
+    // charge consumed a moment ago) and skill lookups here are cheap compared to
+    // the terrain raycast in ShouldUseMovementSkill.
+    private bool IsMovementSkillReady()
     {
         try
         {
-            // 1. Initial checks
+            var skillName = AreWeThereYet.Instance?.Settings?.AutoPilot?.MovementSkill?.SkillName?.Value;
+            if (string.IsNullOrWhiteSpace(skillName))
+                return false;
+
+            var actor = AreWeThereYet.Instance?.GameController?.Player?.GetComponent<Actor>();
+            var actorSkills = actor?.ActorSkills;
+            if (actorSkills == null)
+                return false;
+
+            var skill = actorSkills.FirstOrDefault(s =>
+                string.Equals(s.Name, skillName, StringComparison.OrdinalIgnoreCase));
+
+            if (skill == null)
+            {
+                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                {
+                    var available = string.Join(", ", actorSkills.Select(s => s.Name));
+                    AreWeThereYet.Instance.LogMessage($"IsMovementSkillReady: skill '{skillName}' not found in ActorSkills. Available: {available}");
+                }
+                return false;
+            }
+
+            return skill.CanBeUsed;
+        }
+        catch (Exception ex)
+        {
+            AreWeThereYet.Instance.LogError($"IsMovementSkillReady failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    // Single trigger for the configured movement skill, covering both of its
+    // jobs: getting unstuck over a dashable obstacle (fires regardless of
+    // distance, since that's about being blocked, not about speed) and, once
+    // the path ahead is clear, using it proactively to cover ground faster than
+    // a normal move-click once the target is far enough away to be worth it.
+    private bool ShouldUseMovementSkill(Vector2 targetPosition)
+    {
+        try
+        {
             if (LineOfSight == null ||
                 AreWeThereYet.Instance?.GameController?.Player?.GridPos == null ||
-                AreWeThereYet.Instance?.Settings?.AutoPilot?.DashEnabled?.Value != true)
+                AreWeThereYet.Instance?.Settings?.AutoPilot?.MovementSkillEnabled?.Value != true)
+                return false;
+
+            if (!IsMovementSkillReady())
                 return false;
 
             var playerPos = AreWeThereYet.Instance.GameController.Player.GridPos;
             var distance = Vector2.Distance(playerPos, targetPosition);
 
-            var minDistance = AreWeThereYet.Instance.Settings.AutoPilot.Dash.DashMinDistance.Value;
-            var maxDistance = AreWeThereYet.Instance.Settings.AutoPilot.Dash.DashMaxDistance.Value;
-
-            if (distance < minDistance || distance > maxDistance)
-            {
-                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
-                    AreWeThereYet.Instance.LogMessage($"ShouldUseDash: Distance {distance:F1} outside dash range ({minDistance}-{maxDistance})");
-                return false;
-            }
-
-            // 2. Convert to System.Numerics.Vector2
             var playerPosNumerics = new System.Numerics.Vector2(playerPos.X, playerPos.Y);
             var targetPosNumerics = new System.Numerics.Vector2(targetPosition.X, targetPosition.Y);
-
-            // 3. THE FIX: Call the new method and check the result
             var pathStatus = LineOfSight.GetPathStatus(playerPosNumerics, targetPosNumerics);
 
-            // The new logic: only dash if the path is specifically blocked by a dashable obstacle.
-            var shouldDash = pathStatus == PathStatus.Dashable;
-
-            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+            // Obstacle bypass: the direct line is blocked by something the skill
+            // can cross (a closed door, etc.) - always worth trying, short hop or not.
+            if (pathStatus == PathStatus.Dashable)
             {
-                AreWeThereYet.Instance.LogMessage($"ShouldUseDash: RESULT = {shouldDash} (distance: {distance:F1}, pathStatus: {pathStatus})");
+                if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                    AreWeThereYet.Instance.LogMessage($"ShouldUseMovementSkill: RESULT = true (obstacle bypass, distance: {distance:F1})");
+                return true;
             }
 
-            return shouldDash;
+            // Speed use: only on an actually clear path, and only once the
+            // remaining distance makes it worth spending the skill over a
+            // normal move-click.
+            var minDistance = AreWeThereYet.Instance.Settings.AutoPilot.MovementSkill.MinDistance.Value;
+            var shouldUse = pathStatus == PathStatus.Clear && distance >= minDistance;
+
+            if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                AreWeThereYet.Instance.LogMessage($"ShouldUseMovementSkill: RESULT = {shouldUse} (distance: {distance:F1}, pathStatus: {pathStatus})");
+
+            return shouldUse;
         }
         catch (Exception ex)
         {
-            AreWeThereYet.Instance.LogError($"ShouldUseDash failed: {ex.Message}");
-            return false; // Safe fallback - don't dash if terrain check fails
+            AreWeThereYet.Instance.LogError($"ShouldUseMovementSkill failed: {ex.Message}");
+            return false; // Safe fallback - don't use the skill if terrain/skill lookup fails
         }
     }
 

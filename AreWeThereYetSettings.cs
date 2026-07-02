@@ -6,6 +6,17 @@ using SharpDX;
 
 namespace AreWeThereYet;
 
+// How the configured movement skill behaves once triggered, used to pick the
+// right post-use wait: an instant teleport (Dash, Frostblink, Flame Dash) only
+// needs the usual short input-settle delay, while a travel-time skill (Leap
+// Slam, Shield Charge) needs to be left alone for its animation/travel duration
+// or the next queued move command will cancel it mid-flight.
+public enum MovementSkillKind
+{
+    Teleport,
+    LeapOrCharge
+}
+
 public static class ColorExtensions
 {
     public static Color ToSharpDx(this System.Drawing.Color color)
@@ -27,9 +38,11 @@ public class AutoPilotSettings
     public ToggleNode Enabled { get; set; } = new(false);
     public ToggleNode RemoveGracePeriod { get; set; } = new(true);
     public TextNode LeaderName { get; set; } = new("");
-    public ToggleNode DashEnabled { get; set; } = new(false);
 
-    public HotkeyNode DashKey { get; set; } = new(Keys.W);
+    [Menu("Movement Skill Enabled", "Use a party movement skill (Dash, Leap Slam, etc.) both to get unstuck over dashable obstacles and, once far enough from the next waypoint, just to move faster than a normal move-click.")]
+    public ToggleNode MovementSkillEnabled { get; set; } = new(false);
+
+    public HotkeyNode MovementSkillKey { get; set; } = new(Keys.W);
     public HotkeyNode MoveKey { get; set; } = new(Keys.Q);
     public HotkeyNode ToggleKey { get; set; } = new(Keys.NumPad9);
 
@@ -74,7 +87,7 @@ public class AutoPilotSettings
         public ColorNode TaskLineColor { get; set; } = new(System.Drawing.Color.Green.ToSharpDx());
     }
     
-    public DashSettings Dash { get; set; } = new();
+    public MovementSkillSettings MovementSkill { get; set; } = new();
     public PathfindingSettings Pathfinding { get; set; } = new();
     
     [Submenu(CollapsedByDefault = true)]
@@ -133,15 +146,19 @@ public class AutoPilotSettings
     }
 
     [Submenu(CollapsedByDefault = true)]
-    public class DashSettings
+    public class MovementSkillSettings
     {
-        // public RangeNode<int> TerrainValueForCollision { get; set; } = new(3, 0, 5);
+        [Menu("Skill Name", "Must exactly match the skill's Name as reported by ActorSkills (case-insensitive). Enable Debug > Show Detailed Debug and try to move once to log the available names if you're not sure what to put here.")]
+        public TextNode SkillName { get; set; } = new("Dash");
 
-        [Menu("Minimum Dash Distance")]
-        public RangeNode<int> DashMinDistance { get; set; } = new(10, 0, 1000);
+        [Menu("Skill Kind", "Teleport: instant (Dash, Frostblink, Flame Dash). LeapOrCharge: has travel time (Leap Slam, Shield Charge) - adds Leap Travel Time before the next move command so it doesn't get cancelled mid-flight.")]
+        public MovementSkillKind SkillKind { get; set; } = MovementSkillKind.Teleport;
 
-        [Menu("Maximum Dash Distance")]
-        public RangeNode<int> DashMaxDistance { get; set; } = new(200, 0, 1000);
+        [Menu("Minimum Distance For Speed Use", "Below this distance to the next waypoint, a normal move-click is just as fast, so only a dashable-obstacle bypass will trigger the skill, not this proactive speed use.")]
+        public RangeNode<int> MinDistance { get; set; } = new(50, 0, 1000);
+
+        [Menu("Leap Travel Time (ms)", "Extra wait after using a LeapOrCharge skill before issuing the next move command, so its travel animation isn't cancelled. Ignored for Teleport.")]
+        public RangeNode<int> LeapTravelTimeMs { get; set; } = new(400, 0, 3000);
     }
 }
 
