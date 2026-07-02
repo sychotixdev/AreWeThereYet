@@ -58,6 +58,13 @@ public class AutoPilot
     private string _deathTrackedZone = "";
     private bool _waitingAtZoneEntrance = false;
 
+    // The "Resurrect at Checkpoint" button can report IsVisible == true for a frame or two
+    // before the panel has actually finished laying out (rect still zeroed/mid-animation),
+    // which sends the click to a stale/off-screen position. Require the button to have been
+    // continuously visible for this long before we trust its rect enough to click it.
+    private static readonly TimeSpan ResurrectButtonVisibleDelay = TimeSpan.FromMilliseconds(300);
+    private DateTime? _resurrectButtonVisibleSince = null;
+
     private void ResetPathing()
     {
         tasks = new List<TaskNode>();
@@ -114,6 +121,38 @@ public class AutoPilot
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Debounced visibility check for the "Resurrect at Checkpoint" button. IsVisible can
+    /// flip true for a frame or two before the death panel has finished laying out, which
+    /// would otherwise hand GetResurrectAtCheckpointPosition a stale/zeroed rect and send
+    /// the click off screen. Tracks how long the button has been continuously visible via
+    /// _resurrectButtonVisibleSince and only reports "ready" once that holds for at least
+    /// ResurrectButtonVisibleDelay. Must be polled every tick (including while dead) so the
+    /// visible-since timer resets promptly when the button disappears.
+    /// </summary>
+    private bool IsResurrectButtonReadyToClick()
+    {
+        bool visible;
+        try
+        {
+            var resurrectButton = AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ResurrectPanel?.ResurrectAtCheckpoint;
+            visible = resurrectButton != null && resurrectButton.IsVisible;
+        }
+        catch
+        {
+            visible = false;
+        }
+
+        if (!visible)
+        {
+            _resurrectButtonVisibleSince = null;
+            return false;
+        }
+
+        _resurrectButtonVisibleSince ??= DateTime.Now;
+        return DateTime.Now - _resurrectButtonVisibleSince.Value >= ResurrectButtonVisibleDelay;
     }
 
     public void StartCoroutine()
@@ -768,16 +807,22 @@ public class AutoPilot
             // polling every tick until it does.
             if (!isAliveNow)
             {
-                var resurrectPos = GetResurrectAtCheckpointPosition();
-                if (resurrectPos != null)
+                // Only trust the button's rect once it's been visible for a sustained
+                // period - clicking the moment IsVisible flips true risks a stale/zeroed
+                // rect from the panel still animating in, which sends the click off screen.
+                if (IsResurrectButtonReadyToClick())
                 {
-                    if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
-                        AreWeThereYet.Instance.LogMessage("Clicking Resurrect at Checkpoint.");
+                    var resurrectPos = GetResurrectAtCheckpointPosition();
+                    if (resurrectPos != null)
+                    {
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            AreWeThereYet.Instance.LogMessage("Clicking Resurrect at Checkpoint.");
 
-                    yield return Mouse.SetCursorPosHuman(resurrectPos.Value);
-                    yield return new WaitTime(200);
-                    yield return Mouse.LeftClick();
-                    yield return new WaitTime(500);
+                        yield return Mouse.SetCursorPosHuman(resurrectPos.Value);
+                        yield return new WaitTime(200);
+                        yield return Mouse.LeftClick();
+                        yield return new WaitTime(500);
+                    }
                 }
 
                 yield return new WaitTime(100);
