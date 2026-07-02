@@ -49,6 +49,15 @@ public class AutoPilot
     // stale breadcrumb trail in place.
     private bool _wasAlive = true;
 
+    // Death-in-zone tracking for the "wait at entrance" failsafe (leveling zones only).
+    // Dying repeatedly to the same zone usually means we're getting killed trying to
+    // path through content the leader has already cleared, so instead of feeding the
+    // character back into the same fight we park it and wait for the leader to either
+    // move on (normal zone-transition/portal logic takes over) or come back on screen.
+    private int _deathCountThisZone = 0;
+    private string _deathTrackedZone = "";
+    private bool _waitingAtZoneEntrance = false;
+
     private void ResetPathing()
     {
         tasks = new List<TaskNode>();
@@ -75,7 +84,36 @@ public class AutoPilot
             Core.ParallelRunner.Run(gracePeriodCoroutine);
         }
         ResetPathing();
-            
+
+        // New zone: the per-zone death counter and any "wait at entrance" state from
+        // the previous zone no longer apply. Note that releasing at a checkpoint does
+        // NOT fire AreaChange() (see _wasAlive tracking below), so this only clears on
+        // an actual zone transition - which is exactly when we want a fresh start.
+        _deathCountThisZone = 0;
+        _deathTrackedZone = "";
+        _waitingAtZoneEntrance = false;
+    }
+
+    /// <summary>
+    /// Absolute-screen click position for the "Resurrect at Checkpoint" button on the
+    /// death panel. Same window-offset pattern as GetLabelClickPosition/GetTpButton -
+    /// GetClientRect() is window-relative, Mouse.SetCursorPos needs an absolute point.
+    /// </summary>
+    private Vector2? GetResurrectAtCheckpointPosition()
+    {
+        try
+        {
+            var resurrectButton = AreWeThereYet.Instance.GameController?.Game?.IngameState?.IngameUi?.ResurrectPanel?.ResurrectAtCheckpoint;
+            if (resurrectButton == null || !resurrectButton.IsVisible)
+                return null;
+
+            var windowOffset = AreWeThereYet.Instance.GameController.Window.GetWindowRectangle().TopLeft;
+            return resurrectButton.GetClientRect().Center + windowOffset;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public void StartCoroutine()
@@ -666,6 +704,37 @@ public class AutoPilot
                 if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
                     AreWeThereYet.Instance.LogMessage("Death detected - resetting pathfinding to fall back to A*.");
                 ResetPathing();
+
+                // Count deaths per leveling zone (maps/hideout are excluded - same
+                // isHideout/RealLevel>=68 split used by GetBestAreaTransitionEntity to
+                // distinguish leveling content from endgame). Too many deaths in the
+                // same zone usually means we're dying to something the leader already
+                // cleared, so past the configured threshold we stop chasing and just
+                // wait (see _waitingAtZoneEntrance handling below).
+                var deathZoneIsHideout = (bool)(AreWeThereYet.Instance.GameController?.Area?.CurrentArea?.IsHideout ?? false);
+                var deathZoneRealLevel = AreWeThereYet.Instance.GameController?.Area?.CurrentArea?.RealLevel ?? 0;
+                if (!deathZoneIsHideout && deathZoneRealLevel < 68)
+                {
+                    var currentZoneName = AreWeThereYet.Instance.GameController?.Area?.CurrentArea?.DisplayName ?? "";
+                    if (!string.Equals(_deathTrackedZone, currentZoneName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _deathTrackedZone = currentZoneName;
+                        _deathCountThisZone = 0;
+                    }
+                    _deathCountThisZone++;
+
+                    if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        AreWeThereYet.Instance.LogMessage($"Death #{_deathCountThisZone} in leveling zone '{currentZoneName}'.");
+
+                    if (AreWeThereYet.Instance.Settings.AutoPilot.WaitAtEntranceAfterDeaths.Value &&
+                        _deathCountThisZone >= AreWeThereYet.Instance.Settings.AutoPilot.MaxDeathsBeforeWaiting.Value)
+                    {
+                        _waitingAtZoneEntrance = true;
+
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            AreWeThereYet.Instance.LogMessage($"Death threshold ({AreWeThereYet.Instance.Settings.AutoPilot.MaxDeathsBeforeWaiting.Value}) reached in '{currentZoneName}' - waiting at entrance instead of following.", 5, Color.Orange);
+                    }
+                }
             }
             _wasAlive = isAliveNow;
 
@@ -686,13 +755,35 @@ public class AutoPilot
                 _isTransitioning = false;
             }
 
-            if (!AreWeThereYet.Instance.Settings.Enable.Value || !AreWeThereYet.Instance.Settings.AutoPilot.Enabled.Value || AreWeThereYet.Instance.localPlayer == null || !AreWeThereYet.Instance.localPlayer.IsAlive ||
+            if (!AreWeThereYet.Instance.Settings.Enable.Value || !AreWeThereYet.Instance.Settings.AutoPilot.Enabled.Value || AreWeThereYet.Instance.localPlayer == null ||
                 !AreWeThereYet.Instance.GameController.IsForeGroundCache || MenuWindow.IsOpened || AreWeThereYet.Instance.GameController.IsLoading || !AreWeThereYet.Instance.GameController.InGame)
             {
                 yield return new WaitTime(100);
                 continue;
             }
-            
+
+            // Dead: nothing to path while waiting to respawn. Click "Resurrect at
+            // Checkpoint" the moment the panel offers it rather than releasing
+            // manually - the panel can take a moment to appear, so this just keeps
+            // polling every tick until it does.
+            if (!isAliveNow)
+            {
+                var resurrectPos = GetResurrectAtCheckpointPosition();
+                if (resurrectPos != null)
+                {
+                    if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                        AreWeThereYet.Instance.LogMessage("Clicking Resurrect at Checkpoint.");
+
+                    yield return Mouse.SetCursorPosHuman(resurrectPos.Value);
+                    yield return new WaitTime(200);
+                    yield return Mouse.LeftClick();
+                    yield return new WaitTime(500);
+                }
+
+                yield return new WaitTime(100);
+                continue;
+            }
+
             // TODO: custom settings if user want automatically close all ui shits.
             // var ingameUi = AreWeThereYet.Instance.GameController.IngameState.IngameUi;
 
@@ -850,6 +941,12 @@ public class AutoPilot
                 _lastKnownLeaderZone = "";
                 _leaderZoneChangeTime = DateTime.MinValue;
 
+                // While waiting at the entrance we don't chase the leader through an
+                // intra-zone transition either - that's still "pathing to the leader".
+                // Only a reported zone change (the branch above) or the leader coming
+                // back into view (below) should pull us out of this state.
+                if (!_waitingAtZoneEntrance)
+                {
                 var pfEnabled = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.Enabled.Value;
                 var reachedBounds = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.ReachedBounds.Value;
 
@@ -891,6 +988,7 @@ public class AutoPilot
                         tasks.Add(new TaskNode(closestTransition, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value, TaskNodeType.Transition));
                     }
                 }
+                }
             }
             else if (followTarget != null)
             {
@@ -898,6 +996,31 @@ public class AutoPilot
                 _lastKnownLeaderZone = "";
                 _leaderZoneChangeTime = DateTime.MinValue;
 
+                // Waiting-at-entrance exit condition: the leader is on screen (a
+                // reliable, non-clamped screen projection - see WorldToValidScreenPosition),
+                // i.e. actually "close enough that they are visible on our screen".
+                // Once that's true we drop out of the waiting state and fall through to
+                // normal follow logic below this tick.
+                if (_waitingAtZoneEntrance)
+                {
+                    Helper.WorldToValidScreenPosition(followTarget.Pos, out var leaderOffScreen);
+                    if (!leaderOffScreen)
+                    {
+                        _waitingAtZoneEntrance = false;
+                        if (AreWeThereYet.Instance.Settings.Debug.ShowDetailedDebug?.Value == true)
+                            AreWeThereYet.Instance.LogMessage("Leader visible on screen - resuming normal follow.");
+                    }
+                }
+
+                if (_waitingAtZoneEntrance)
+                {
+                    // Still waiting: stay put, don't path toward the leader.
+                    tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
+                    if (followTarget?.Pos != null)
+                        lastTargetPosition = followTarget.Pos;
+                }
+                else
+                {
                 var playerPos     = AreWeThereYet.Instance.playerPosition;
                 var leaderPos     = followTarget.Pos;
                 var pfSettings    = AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding;
@@ -1002,6 +1125,7 @@ public class AutoPilot
 
                 if (followTarget?.Pos != null)
                     lastTargetPosition = followTarget.Pos;
+                }
             }
 
             if (tasks?.Count > 0)
@@ -1668,6 +1792,12 @@ public class AutoPilot
         }
 
         AreWeThereYet.Instance.Graphics.DrawText("AutoPilot: Active", new System.Numerics.Vector2(350, 120));
+        if (_waitingAtZoneEntrance)
+        {
+            AreWeThereYet.Instance.Graphics.DrawText(
+                $"Waiting at zone entrance (deaths: {_deathCountThisZone})",
+                new System.Numerics.Vector2(350, 100), Color.Orange);
+        }
         AreWeThereYet.Instance.Graphics.DrawText("Coroutine: " + (autoPilotCoroutine.Running ? "Active" : "Dead"), new System.Numerics.Vector2(350, 140));
         AreWeThereYet.Instance.Graphics.DrawText("Leader: " + "[ " + AreWeThereYet.Instance.Settings.AutoPilot.LeaderName.Value + " ] " + (followTarget != null ? "Found" : "Null"), new System.Numerics.Vector2(500, 160));
         AreWeThereYet.Instance.Graphics.DrawLine(new System.Numerics.Vector2(490, 110), new System.Numerics.Vector2(490, 210), 1, Color.White);

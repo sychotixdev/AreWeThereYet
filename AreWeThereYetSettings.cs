@@ -53,6 +53,12 @@ public class AutoPilotSettings
     [Menu("Zone Update Buffer (ms)")]
     public RangeNode<int> ZoneUpdateBuffer { get; set; } = new(1000, 500, 5000);
 
+    [Menu("Wait At Zone Entrance After Repeated Deaths", "In leveling zones (not maps/hideout), stop pathing to the leader after dying too many times in the current zone - instead wait where we are for the leader to transition to a new zone (or come back into view).")]
+    public ToggleNode WaitAtEntranceAfterDeaths { get; set; } = new(true);
+
+    [Menu("Deaths Before Waiting At Entrance", "How many deaths in the current leveling zone before we stop following and wait for the leader to transition or come back on screen.")]
+    public RangeNode<int> MaxDeathsBeforeWaiting { get; set; } = new(3, 1, 20);
+
     public VisualSettings Visual { get; set; } = new();
 
     [Submenu(CollapsedByDefault = true)]
