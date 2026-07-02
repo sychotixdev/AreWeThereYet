@@ -438,49 +438,56 @@ public class LeaderFollower
         {
             int clearance = PfSettings.PathClearance.Value;
             int maxClickDistance = PfSettings.MaxClickDistance.Value;
-            int bestIdx = -1;
-            for (int i = _trail.Count - 1; i >= 0; i--)
-            {
-                // Cap the click target's distance: Camera.WorldToScreen() produces
-                // wrong-direction garbage for points beyond reliable projection range
-                // (see ScreenClamp diagnostics/MaxClickDistance comment), so a distant
-                // waypoint must never be selected here even when the straight line to
-                // it is fully walkable on an open map.
-                if (Vector3.Distance(playerPos, _trail[i]) > maxClickDistance)
-                    continue;
 
-                if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], clearance))
+            // Leash: only close all the way in on the trail when we already have line of
+            // sight to the live target. If LOS is currently blocked (leader just went
+            // round a corner, behind an obstruction, etc.) the leash is ignored below so
+            // we keep closing in until sight is restored — this is what makes the "within
+            // KeepWithinDistance AND in line of sight" requirement actually hold, instead
+            // of a distance-only leash that could strand us out of sight of the leader.
+            bool hasLosToTarget = LineOfSight.HasLineOfSightRaw(playerPos, targetPos);
+
+            int bestIdx = -1;
+            int usedClearance = clearance;
+            bool leashRespected = false;
+
+            if (hasLosToTarget)
+            {
+                bestIdx = FindBestTrailIndex(playerPos, targetPos, maxClickDistance, clearance,
+                    respectLeash: true, arriveWithin);
+                if (bestIdx < 0 && clearance > 0)
                 {
-                    bestIdx = i;
-                    break;
+                    bestIdx = FindBestTrailIndex(playerPos, targetPos, maxClickDistance, 0,
+                        respectLeash: true, arriveWithin);
+                    if (bestIdx >= 0) usedClearance = 0;
                 }
+                leashRespected = bestIdx >= 0;
             }
 
-            // Fallback found the deadlock: JPS only guarantees per-cell walkability
-            // (isPathable checks value 1/5, no clearance band), and SmoothGridPath's
-            // single-step fallback ("adjacent cells are walkable") never verifies
-            // clearance either — only its multi-cell shortcuts do. So in a corridor
-            // narrower than 2*clearance+1 cells, EVERY point on an otherwise-valid
-            // trail can fail this clearance-aware check, giving bestIdx=-1 forever.
-            // That's a hard stall: no MoveTo is ever returned again (confirmed by
-            // the "did not move at all" test run - bestIdx=-1 on every single tick).
-            // Retry with clearance=0 (raw walkability, exactly what JPS guarantees)
-            // before giving up — a wall-hugging move through a tight gap beats a
-            // permanent freeze.
-            int usedClearance = clearance;
-            if (bestIdx < 0 && clearance > 0)
+            // No LOS, or every leash-respecting candidate failed the walkable-line /
+            // clearance check (e.g. a very short trail right after a zone change, where
+            // every remaining point is already inside the leash radius) — fall back to
+            // the unrestricted scan. Fallback found the deadlock: JPS only guarantees
+            // per-cell walkability (isPathable checks value 1/5, no clearance band), and
+            // SmoothGridPath's single-step fallback ("adjacent cells are walkable") never
+            // verifies clearance either — only its multi-cell shortcuts do. So in a
+            // corridor narrower than 2*clearance+1 cells, EVERY point on an otherwise-
+            // valid trail can fail the clearance-aware check, giving bestIdx=-1 forever.
+            // That's a hard stall: no MoveTo is ever returned again (confirmed by the
+            // "did not move at all" test run - bestIdx=-1 on every single tick). Retry
+            // with clearance=0 (raw walkability, exactly what JPS guarantees) before
+            // giving up — a wall-hugging move through a tight gap beats a permanent
+            // freeze.
+            if (bestIdx < 0)
             {
-                for (int i = _trail.Count - 1; i >= 0; i--)
+                usedClearance = clearance;
+                bestIdx = FindBestTrailIndex(playerPos, targetPos, maxClickDistance, clearance,
+                    respectLeash: false, arriveWithin);
+                if (bestIdx < 0 && clearance > 0)
                 {
-                    if (Vector3.Distance(playerPos, _trail[i]) > maxClickDistance)
-                        continue;
-
-                    if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], 0))
-                    {
-                        bestIdx = i;
-                        usedClearance = 0;
-                        break;
-                    }
+                    bestIdx = FindBestTrailIndex(playerPos, targetPos, maxClickDistance, 0,
+                        respectLeash: false, arriveWithin);
+                    if (bestIdx >= 0) usedClearance = 0;
                 }
             }
 
@@ -488,7 +495,8 @@ public class LeaderFollower
 
             if (LogEnabled)
                 DebugLog($"TrailScan bestIdx={bestIdx} trailCount={_trail.Count} " +
-                         $"clearance={clearance} usedClearance={usedClearance}");
+                         $"clearance={clearance} usedClearance={usedClearance} " +
+                         $"hasLos={hasLosToTarget} leashRespected={leashRespected}");
 
             if (bestIdx >= 0)
             {
@@ -527,6 +535,37 @@ public class LeaderFollower
 
         // 8. No path and no last known location → wait.
         return FollowResult.Idle;
+    }
+
+    /// <summary>
+    /// Scans the trail from newest to oldest for the furthest point reachable from
+    /// <paramref name="playerPos"/> by a straight walkable line, i.e. the greedy
+    /// closest-approach-to-target candidate. When <paramref name="respectLeash"/> is
+    /// true, candidates within <paramref name="arriveWithin"/> world units of
+    /// <paramref name="targetPos"/> are skipped — this is what keeps the follower from
+    /// walking all the way up to the leader instead of stopping at the configured
+    /// KeepWithinDistance. Returns -1 if no candidate satisfies the constraints.
+    /// </summary>
+    private int FindBestTrailIndex(Vector3 playerPos, Vector3 targetPos, int maxClickDistance,
+        int clearance, bool respectLeash, int arriveWithin)
+    {
+        for (int i = _trail.Count - 1; i >= 0; i--)
+        {
+            // Cap the click target's distance: Camera.WorldToScreen() produces
+            // wrong-direction garbage for points beyond reliable projection range (see
+            // ScreenClamp diagnostics/MaxClickDistance comment), so a distant waypoint
+            // must never be selected here even when the straight line to it is fully
+            // walkable on an open map.
+            if (Vector3.Distance(playerPos, _trail[i]) > maxClickDistance)
+                continue;
+
+            if (respectLeash && Vector3.Distance(_trail[i], targetPos) < arriveWithin)
+                continue;
+
+            if (LineOfSight.HasWalkableLineRaw(playerPos, _trail[i], clearance))
+                return i;
+        }
+        return -1;
     }
 
     /// <summary>

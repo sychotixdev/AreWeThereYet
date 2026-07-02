@@ -1076,9 +1076,18 @@ public class AutoPilot
                 }
                 else
                 {
-                    // Pathfinding disabled: simple direct-follow fallback
+                    // Pathfinding disabled: simple direct-follow fallback. Stop only once
+                    // BOTH within KeepWithinDistance AND in line of sight of the leader,
+                    // matching the pathfinding-enabled behaviour in LeaderFollower.
                     var distanceToLeader = Vector3.Distance(playerPos, leaderPos);
-                    if (distanceToLeader >= AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value)
+                    // Terrain data is normally kept fresh by LeaderFollower.Tick, which only
+                    // runs when pathfinding is enabled — populate it here too so the LOS
+                    // check below doesn't silently see stale/absent terrain and report "no
+                    // LOS" (which would force movement) every tick.
+                    AreWeThereYet.Instance.lineOfSight.EnsureTerrainData();
+                    var hasLosToLeader = AreWeThereYet.Instance.lineOfSight.HasLineOfSightRaw(playerPos, leaderPos);
+                    if (distanceToLeader >= AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value ||
+                        !hasLosToLeader)
                     {
                         tasks.RemoveAll(t => t.Type == TaskNodeType.Movement);
                         tasks.Add(new TaskNode(leaderPos, AreWeThereYet.Instance.Settings.AutoPilot.KeepWithinDistance.Value));
@@ -1202,7 +1211,14 @@ public class AutoPilot
                             Keyboard.KeyUp(AreWeThereYet.Instance.Settings.AutoPilot.MoveKey);
                         }
 
-                        if (taskDistance <= AreWeThereYet.Instance.Settings.AutoPilot.Pathfinding.ReachedBounds.Value)
+                        // Use the task's own Bounds, not a hardcoded ReachedBounds: pathfinding-
+                        // generated waypoints are created with the small ReachedBounds value
+                        // (they're intermediate trail points), but the no-pathfinding direct-
+                        // follow fallback creates its Movement task with KeepWithinDistance as
+                        // Bounds — that leash was previously being ignored here, so the bot
+                        // walked all the way down to ReachedBounds (~50 units) regardless of
+                        // the configured KeepWithinDistance.
+                        if (taskDistance <= currentTask.Bounds)
                             tasks.RemoveAt(0);
                         yield return null;
                         yield return null;
